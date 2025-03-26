@@ -1,0 +1,55 @@
+# T-LITE Configuration
+name: "T-LITE Base Configuration"
+description: "Base configuration for T-LITE neural prefetcher with behavioral clustering"
+
+# Model Structure Parameters
+pc_embed_size: 64        # Size of PC embedding vector
+cluster_embed_size: 25   # Size of cluster embedding vector
+offset_embed_size: 2500  # Size of offset embedding vector (cluster_embed_size * num_experts)
+num_experts: 100         # Number of experts for mixture-of-experts architecture
+history_length: 3        # Number of history entries to consider
+num_pcs: 4096           # Maximum number of unique PCs to track
+num_clusters: 4096      # Number of behavioral clusters
+offset_size: 64         # Number of possible offsets within a page (2^offset_bits)
+num_candidates: 4       # Number of candidate pages to consider for prefetching
+dpf_history_length: 1   # Length of DPF vector history
+offset_bits: 6          # Number of bits for offset within a page
+
+# Training Parameters
+learning_rate: 0.001    # Initial learning rate
+lr_decay_rate: 0.5      # Learning rate decay factor
+batch_size: 256         # Training batch size
+epochs: 500             # Maximum number of training epochs
+early_stopping_patience: 50  # Number of epochs to wait before early stopping
+steps_per_epoch: 80000  # Number of training steps per epoch
+
+# Quantization Parameters
+quantize_bits: 8        # Number of bits for weight quantization
+
+# Prefetcher Parameters
+use_deltas: true        # Whether to use delta encoding for addresses
+multi_label: false      # Whether to allow multiple prefetches per access
+global_stream: false    # Whether to use global stream detection
+pc_localized: true      # Whether to use PC-localized predictions
+global_output: false    # Whether to use global output layer
+
+# Memory Management Parameters
+max_pages: 1000000      # Maximum number of pages to track
+max_clusters: 4096      # Maximum number of clusters to maintain
+cache_size_kb: 64       # Size of metadata cache in KB
+cache_ways: 8           # Number of ways in metadata cache
+
+# Performance Monitoring
+enable_profiling: false # Whether to enable detailed performance profiling
+profile_interval: 1000  # Number of accesses between profile snapshots
+log_level: "INFO"       # Logging level (DEBUG, INFO, WARNING, ERROR)
+
+# Evaluation Parameters
+eval_window: 100        # Window size for evaluating prefetch accuracy
+coverage_threshold: 0.1 # Minimum coverage threshold for prefetching
+accuracy_threshold: 0.5 # Minimum accuracy threshold for prefetching
+
+# System Parameters
+num_workers: 4          # Number of worker threads for data processing
+prefetch_buffer_size: 1000  # Size of prefetch buffer
+max_prefetch_distance: 100  # Maximum distance for prefetching

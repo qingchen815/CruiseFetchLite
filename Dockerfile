@@ -24,7 +24,7 @@ RUN ln -sf /usr/bin/python3.8 /usr/bin/python
 RUN python -m pip install --no-cache-dir pip setuptools wheel
 
 # Install Python dependencies
-COPY requirements.txt /tmp/
+COPY app/requirements.txt /tmp/
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Install TensorFlow with GPU support
@@ -34,10 +34,10 @@ RUN pip install --no-cache-dir tensorflow==2.12.0
 WORKDIR /app
 
 # Copy project files
-COPY . /app/
+COPY app/ /app/
 
 # Create data directory
 RUN mkdir -p /data
 
 # Set default command
-CMD ["python", "example.py", "--simulate"] 
+CMD ["python", "train.py", "--help"] 
