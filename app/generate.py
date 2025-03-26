@@ -4,9 +4,9 @@ import tensorflow as tf
 import lzma
 import os
 
-from config import TLITEConfig, load_config
-from model import create_tlite_model
-from prefetcher import TLITEPrefetcher
+from script.config import TLITEConfig, load_config
+from script.model import create_tlite_model
+from script.prefetcher import TLITEPrefetcher
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate prefetch files using T-LITE model')
@@ -14,7 +14,7 @@ def parse_args():
     parser.add_argument('--clustering-path', help='Path to clustering information', required=True)
     parser.add_argument('--benchmark', help='Path to benchmark trace', required=True)
     parser.add_argument('--output', help='Path to output prefetch file', required=True)
-    parser.add_argument('--config', default='./configs/tlite.yaml', help='Path to configuration file')
+    parser.add_argument('--config', default='./config/TLITE2debug1.yaml', help='Path to configuration file')
     return parser.parse_args()
 
 def generate_prefetches(model, clustering_info, trace_path, config, output_path):

@@ -1,6 +1,6 @@
 import numpy as np
-from tlite.metadata import DPFMetadataManager
-from tlite.clustering import BehavioralClusteringUtils
+from metadata import DPFMetadataManager
+from clustering import BehavioralClusteringUtils
 
 class TLITEPrefetcher:
     '''

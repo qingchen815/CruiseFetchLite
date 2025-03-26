@@ -4,15 +4,15 @@ import tensorflow as tf
 import lzma
 import os
 
-from config import TLITEConfig, load_config, extend_voyager_config_for_tlite
-from model import create_tlite_model
-from clustering import BehavioralClusteringUtils
+from script.config import TLITEConfig, load_config, extend_voyager_config_for_tlite
+from script.model import create_tlite_model
+from script.clustering import BehavioralClusteringUtils
 
 def parse_args():
     parser = argparse.ArgumentParser(description='T-LITE model training')
     parser.add_argument('--benchmark', help='Path to the benchmark trace', required=True)
     parser.add_argument('--model-path', help='Path to save model checkpoint', required=True)
-    parser.add_argument('--config', default='./configs/tlite.yaml', help='Path to configuration file')
+    parser.add_argument('--config', default='./script/config/TLITE2debug1.yaml', help='Path to configuration file')
     parser.add_argument('--debug', action='store_true', default=False, help='Debug mode with smaller dataset')
     parser.add_argument('--tb-dir', help='TensorBoard log directory')
     return parser.parse_args()

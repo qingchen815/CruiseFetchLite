@@ -24,6 +24,7 @@ docker build -t tlite2 .
 ```bash
 docker run -it --gpus all -v /path/to/data:/data tlite2
 ```
+docker run -it --gpus all -v /path/to/data:/data tlite2 /bin/bash
 
 ### Manual Installation
 
@@ -42,7 +43,7 @@ pip install -r requirements.txt
 
 ### Training
 
-To train the T-LITE model on a memory trace:
+To train the T-LITE model on a memory trace: !
 
 ```bash
 docker run -it --gpus all \
@@ -54,6 +55,8 @@ docker run -it --gpus all \
     --debug \
     --tb-dir /data/models/tensorboard_logs
 ```
+single line version :
+docker run -it --gpus all -v (Get-Location).Path/data:/data tlite2 python train.py --benchmark /data/traces/471.omnetpp-s0.txt.xz --model-path /data/models/tlite2_model --config /app/config/TLITE2debug1.yaml --debug --tb-dir /data/models/tensorboard_logs
 
 ### Generating Prefetches
 
@@ -68,6 +71,9 @@ docker run -it --gpus all \
     --benchmark /data/traces/471.omnetpp-s0.txt.xz \
     --output /data/models/prefetch.txt
 ```
+single line version:
+docker run -it --gpus all -v $(pwd)/data:/data tlite2 python generate.py --model-path /data/models/tlite2_model --clustering-path /data/models/clustering.npy --benchmark /data/traces/471.omnetpp-s0.txt.xz --output /data/models/prefetch.txt
+
 
 ### Example Usage
 
@@ -106,15 +112,25 @@ The model can be configured through a YAML file. See `configs/baseTLITE2.yaml` f
 
 ```
 TLITE2/
-├── app/                    # 应用代码
-│   ├── config/            # 配置文件
-│   ├── train.py           # 训练脚本
-│   ├── generate.py        # 预取生成脚本
-│   └── requirements.txt   # Python依赖
-├── data/                  # 数据目录
-│   ├── traces/           # 内存追踪文件
-│   └── models/           # 保存的模型和聚类信息
-└── Dockerfile            # Docker配置
+├── app/
+│   ├── config/XXX.yaml
+│   ├── script/
+│   │   ├── __init__.py
+│   │   ├── config.py
+│   │   ├── clustering.py
+│   │   ├── example.py
+│   │   ├── init.py
+│   │   ├── metadata.py
+│   │   ├── metrics.py
+│   │   ├── model.py
+│   │   └── prefetcher.py
+│   ├── train.py
+    ├── generate.py
+│   └── requirements.txt
+├── data/
+│   ├── traces/
+│   └── models/
+└── Dockerfile
 ```
 
 ## Performance Metrics
