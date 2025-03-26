@@ -1,0 +1,33 @@
+# T-LITE Configuration
+name: "T-LITE Base Configuration"
+
+# Model Structure Parameters
+pc_embed_size: 64
+cluster_embed_size: 25
+offset_embed_size: 2500
+num_experts: 100
+history_length: 3
+num_pcs: 4096
+num_clusters: 4096
+offset_size: 64
+num_candidates: 4
+dpf_history_length: 1
+offset_bits: 6
+
+# Training Parameters
+learning_rate: 0.001
+lr_decay_rate: 0.5
+batch_size: 256
+epochs: 500
+early_stopping_patience: 50
+steps_per_epoch: 80000
+
+# Quantization Parameters
+quantize_bits: 8
+
+# Prefetcher Parameters
+use_deltas: true
+multi_label: false
+global_stream: false
+pc_localized: true
+global_output: false
