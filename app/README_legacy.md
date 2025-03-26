@@ -26,6 +26,19 @@ docker run -it --gpus all -v /path/to/data:/data tlite2
 ```
 docker run -it --gpus all -v /path/to/data:/data tlite2 /bin/bash
 
+2. 避免 rebuild，直接挂载修改后的文件
+与其每次修改后 rebuild 镜像，可以直接挂载本地目录，像你之前那样运行容器：
+
+bash
+
+收起
+
+自动换行
+
+复制
+docker run -it --gpus all -v D:\TLITE2:/app tlite2
+原理：-v D:\TLITE2:/app 将本地目录挂载到容器内的 /app，修改本地文件后无需 rebuild，容器会直接使用最新版本。
+适用场景：开发阶段，频繁修改代码时。
 ### Manual Installation
 
 1. Clone the repository:
@@ -125,7 +138,7 @@ TLITE2/
 │   │   ├── model.py
 │   │   └── prefetcher.py
 │   ├── train.py
-    ├── generate.py
+│   ├── generate.py
 │   └── requirements.txt
 ├── data/
 │   ├── traces/

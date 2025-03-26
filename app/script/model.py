@@ -1,5 +1,6 @@
 import tensorflow as tf
 import numpy as np
+import sys
 
 class TLITE(tf.keras.Model):
     '''
@@ -83,6 +84,9 @@ class TLITE(tf.keras.Model):
         Compute context-aware offset embeddings by incorporating cluster and PC context
         using the mixture-of-experts approach
         '''
+        # Get actual batch size
+        batch_size = tf.shape(cluster_history)[0]
+        
         # Get raw embeddings
         cluster_embed = self.cluster_embedding(cluster_history)  # [batch, history, embed_dim]
         offset_embed = self.offset_embedding(offset_history)     # [batch, history, offset_embed_size]
@@ -90,31 +94,52 @@ class TLITE(tf.keras.Model):
         
         # Reshape offset embeddings for attention mechanism
         # Split offset embedding into experts
-        batch_size = tf.shape(offset_history)[0]
         offset_embed = tf.reshape(
             offset_embed, 
-            shape=[-1, self.history_length, self.num_experts, self.cluster_embed_size]
+            shape=[batch_size, self.history_length, self.num_experts, self.cluster_embed_size]
         )
         
         # Create context embedding by concatenating cluster and PC
         # Expand dimensions for attention mechanism
-        context_embed = tf.concat([
-            tf.reshape(cluster_embed, [-1, self.history_length, 1, self.cluster_embed_size]),
-            tf.reshape(pc_embed, [-1, 1, 1, self.pc_embed_size])
-        ], axis=2)
-        context_embed = tf.reshape(context_embed, [-1, self.history_length, 1, self.cluster_embed_size])
+        cluster_embed_expanded = tf.reshape(cluster_embed, [batch_size, self.history_length, 1, self.cluster_embed_size])
+        
+        # Expand pc_embed to match cluster_embed's dimensions
+        pc_embed_expanded = tf.tile(
+            tf.reshape(pc_embed, [batch_size, 1, 1, self.pc_embed_size]),
+            [1, self.history_length, 1, 1]
+        )
+        
+        # Handle dimension mismatch between pc_embed and cluster_embed
+        if self.pc_embed_size != self.cluster_embed_size:
+            if self.pc_embed_size < self.cluster_embed_size:
+                # Pad pc_embed if it's smaller
+                pc_embed_expanded = tf.pad(
+                    pc_embed_expanded,
+                    [[0, 0], [0, 0], [0, 0], [0, self.cluster_embed_size - self.pc_embed_size]]
+                )
+            else:
+                # Truncate pc_embed if it's larger
+                pc_embed_expanded = pc_embed_expanded[:, :, :, :self.cluster_embed_size]
+        
+        # Concatenate and reshape for attention
+        context_embed = tf.concat([cluster_embed_expanded, pc_embed_expanded], axis=2)
+        context_embed = tf.reshape(context_embed, [batch_size, self.history_length, 1, self.cluster_embed_size])
+        
+        # Debug prints
+        tf.print("context_embed shape:", tf.shape(context_embed), output_stream=sys.stderr)
+        tf.print("offset_embed shape:", tf.shape(offset_embed), output_stream=sys.stderr)
         
         # Apply attention to get weighted offset embeddings
         context_aware_offset = self.mha(
-            context_embed,  # Query
-            offset_embed,   # Key/Value
+            query=context_embed,  # [batch, history, 1, cluster_embed_size]
+            value=offset_embed,   # [batch, history, num_experts, cluster_embed_size]
             training=training
         )
         
         # Reshape to final embedding dimension
         context_aware_offset = tf.reshape(
             context_aware_offset, 
-            [-1, self.history_length, self.cluster_embed_size]
+            [batch_size, self.history_length, self.cluster_embed_size]
         )
         
         return context_aware_offset
