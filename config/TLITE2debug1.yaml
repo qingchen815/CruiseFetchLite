@@ -1,0 +1,55 @@
+# T-LITE Debug Configuration for RTX 3060 6GB
+name: "T-LITE Debug Configuration"
+description: "Debug configuration optimized for RTX 3060 6GB GPU with smaller model size"
+
+# Model Structure Parameters (Reduced sizes for debug)
+pc_embed_size: 32        # Reduced from 64
+cluster_embed_size: 16   # Reduced from 25
+offset_embed_size: 800   # Reduced from 2500 (cluster_embed_size * num_experts)
+num_experts: 50          # Reduced from 100
+history_length: 3        # Keep same for basic functionality
+num_pcs: 1024           # Reduced from 4096
+num_clusters: 512       # Reduced from 4096
+offset_size: 64         # Keep same for basic functionality
+num_candidates: 2       # Reduced from 4
+dpf_history_length: 1   # Keep same
+offset_bits: 6          # Keep same
+
+# Training Parameters (Optimized for quick debug)
+learning_rate: 0.001    # Keep same
+lr_decay_rate: 0.5      # Keep same
+batch_size: 64          # Reduced from 256 for less memory usage
+epochs: 10              # Reduced from 500 for quick testing
+early_stopping_patience: 3  # Reduced from 50
+steps_per_epoch: 1000   # Reduced from 80000
+
+# Quantization Parameters
+quantize_bits: 8        # Keep same
+
+# Prefetcher Parameters (Simplified for debug)
+use_deltas: true        # Keep same
+multi_label: false      # Keep same
+global_stream: false    # Keep same
+pc_localized: true      # Keep same
+global_output: false    # Keep same
+
+# Memory Management Parameters (Reduced for debug)
+max_pages: 10000        # Reduced from 1000000
+max_clusters: 512       # Reduced from 4096
+cache_size_kb: 32       # Reduced from 64
+cache_ways: 4           # Reduced from 8
+
+# Performance Monitoring
+enable_profiling: true  # Enable for debug
+profile_interval: 100   # Reduced from 1000
+log_level: "DEBUG"      # Set to DEBUG level
+
+# Evaluation Parameters
+eval_window: 50         # Reduced from 100
+coverage_threshold: 0.1 # Keep same
+accuracy_threshold: 0.5 # Keep same
+
+# System Parameters (Reduced for debug)
+num_workers: 2          # Reduced from 4
+prefetch_buffer_size: 100  # Reduced from 1000
+max_prefetch_distance: 50  # Reduced from 100 
