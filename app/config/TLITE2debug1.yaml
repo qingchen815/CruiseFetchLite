@@ -5,8 +5,8 @@ description: "Debug configuration optimized for RTX 3060 6GB GPU with smaller mo
 # Model Structure Parameters (Reduced sizes for debug)
 pc_embed_size: 32        # Reduced from 64
 cluster_embed_size: 16   # Reduced from 25
-offset_embed_size: 800   # Reduced from 2500 (cluster_embed_size * num_experts)
-num_experts: 50          # Reduced from 100
+offset_embed_size: 80   # 必须等于 cluster_embed_size * num_experts (eg.16*5=80)
+num_experts: 5          # Reduced from 100
 history_length: 3        # Keep same for basic functionality
 num_pcs: 1024           # Reduced from 4096
 num_clusters: 512       # Reduced from 4096
