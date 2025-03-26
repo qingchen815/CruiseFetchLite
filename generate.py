@@ -4,42 +4,31 @@ import tensorflow as tf
 import lzma
 import os
 
-from tlite.config import ModelConfig, extend_voyager_config_for_tlite
-from tlite.models import create_tlite_model
-from tlite.prefetcher import TLITEPrefetcher
-from tlite.clustering import BehavioralClusteringUtils
+from config import TLITEConfig, load_config
+from model import create_tlite_model
+from prefetcher import TLITEPrefetcher
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Generate prefetch file for ChampSim')
-    parser.add_argument('--benchmark', help='Path to the benchmark trace', required=True)
-    parser.add_argument('--model-path', help='Path to trained model', required=True)
-    parser.add_argument('--prefetch-file', help='Path to output prefetch file', required=True)
+    parser = argparse.ArgumentParser(description='Generate prefetch files using T-LITE model')
+    parser.add_argument('--model-path', help='Path to model checkpoint', required=True)
+    parser.add_argument('--clustering-path', help='Path to clustering information', required=True)
+    parser.add_argument('--benchmark', help='Path to benchmark trace', required=True)
+    parser.add_argument('--output', help='Path to output prefetch file', required=True)
     parser.add_argument('--config', default='./configs/tlite.yaml', help='Path to configuration file')
-    parser.add_argument('--train', action='store_true', default=False, help='Generate for train dataset')
-    parser.add_argument('--valid', action='store_true', default=False, help='Generate for valid dataset')
-    parser.add_argument('--no-test', action='store_true', default=False, help='Skip test dataset')
-    parser.add_argument('--twilight', action='store_true', default=False, help='Use Twilight model instead of T-LITE')
     return parser.parse_args()
 
-def create_prefetch_file(prefetch_file, inst_ids, addresses, append=False):
-    '''Create a prefetch file for ChampSim'''
-    with open(prefetch_file, 'a' if append else 'w') as f:
-        for inst_id, addr in zip(inst_ids, addresses):
-            print(inst_id, hex(addr), file=f)
-
-def generate_prefetches(trace_path, model, config, twilight=False):
-    """Generate prefetches for a trace file"""
-    print(f"Generating prefetches for: {trace_path}")
+def generate_prefetches(model, clustering_info, trace_path, config, output_path):
+    """
+    Generate prefetch file using T-LITE model
+    """
+    print(f"Generating prefetches for {trace_path}")
     
-    # Create prefetcher
-    prefetcher = TLITEPrefetcher(model, config)
-    
-    # Load clustering information if using T-LITE
-    if not twilight:
-        clustering_path = os.path.join(os.path.dirname(config.model_path), 'clustering.npy')
-        if os.path.exists(clustering_path):
-            clustering = np.load(clustering_path, allow_pickle=True).item()
-            prefetcher.metadata_manager.page_cluster_map = clustering['cluster_map']
+    # Initialize prefetcher
+    prefetcher = TLITEPrefetcher(
+        model=model,
+        clustering_info=clustering_info,
+        config=config
+    )
     
     # Read trace file
     if trace_path.endswith('.txt.xz'):
@@ -47,77 +36,67 @@ def generate_prefetches(trace_path, model, config, twilight=False):
     else:
         f = open(trace_path, 'r')
     
-    # Track prefetches
-    prefetch_addresses = []
-    inst_ids = []
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Process line by line
-    for line in f:
-        # Skip comments
-        if line.startswith('***') or line.startswith('Read'):
-            continue
+    # Process trace and generate prefetches
+    with open(output_path, 'w') as out_f:
+        for line in f:
+            # Skip comments
+            if line.startswith('***') or line.startswith('Read'):
+                continue
             
-        # Parse line
-        split = line.strip().split(', ')
-        inst_id = int(split[0])
-        pc = int(split[3], 16)
-        addr = int(split[2], 16)
-        
-        # Get prefetch
-        prefetch = prefetcher.handle_access(addr, pc)
-        
-        # Store if a prefetch was generated
-        if prefetch is not None:
-            prefetch_addresses.append(prefetch)
-            inst_ids.append(inst_id)
+            # Parse line
+            split = line.strip().split(', ')
+            inst_id = int(split[0])
+            pc = int(split[3], 16)
+            addr = int(split[2], 16)
+            
+            # Convert address to page and offset
+            page = (addr >> 6) >> config.offset_bits
+            offset = (addr >> 6) & ((1 << config.offset_bits) - 1)
+            
+            # Update prefetcher history
+            prefetcher.update_history(page, offset, pc)
+            
+            # Generate prefetches
+            prefetches = prefetcher.get_prefetches()
+            
+            # Write prefetches to file
+            if prefetches:
+                out_f.write(f"{inst_id}:")
+                for i, (candidate, offset) in enumerate(prefetches):
+                    if i > 0:
+                        out_f.write(",")
+                    out_f.write(f"{candidate}:{offset}")
+                out_f.write("\n")
     
     f.close()
-    
-    print(f"Generated {len(prefetch_addresses)} prefetches")
-    prefetcher.print_stats()
-    
-    return inst_ids, prefetch_addresses
+    print(f"Generated prefetch file: {output_path}")
 
 def main():
     args = parse_args()
     
     # Load configuration
-    config = extend_voyager_config_for_tlite(args.config)
+    config = load_config(args.config)
     
-    # Set model path
-    config.model_path = args.model_path
-    
-    # Create model
+    # Load model
     model = create_tlite_model(config)
-    
-    # Load model weights
     model.load_weights(args.model_path)
     
-    # Determine which parts of the trace to process
-    start_test = 0
-    if args.train:
-        start_test = 200_000_000  # Skip first 200M instructions
-    if args.valid:
-        start_test = 225_000_000  # Skip first 225M instructions
+    # Load clustering information
+    clustering_info = np.load(args.clustering_path, allow_pickle=True).item()
     
     # Generate prefetches
-    inst_ids = []
-    prefetch_addresses = []
+    generate_prefetches(
+        model=model,
+        clustering_info=clustering_info,
+        trace_path=args.benchmark,
+        config=config,
+        output_path=args.output
+    )
     
-    # Read trace and generate prefetches
-    if args.train or args.valid or not args.no_test:
-        trace_ids, trace_addrs = generate_prefetches(
-            args.benchmark, model, config, args.twilight
-        )
-        inst_ids.extend(trace_ids)
-        prefetch_addresses.extend(trace_addrs)
-    
-    # Create prefetch file
-    if prefetch_addresses:
-        create_prefetch_file(args.prefetch_file, inst_ids, prefetch_addresses)
-        print(f"Prefetch file created: {args.prefetch_file}")
-    else:
-        print("No prefetches generated")
+    print("Prefetch generation complete!")
 
 if __name__ == "__main__":
     main()

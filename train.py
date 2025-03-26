@@ -4,7 +4,7 @@ import tensorflow as tf
 import lzma
 import os
 
-from config import ModelConfig, extend_voyager_config_for_tlite
+from config import TLITEConfig, load_config, extend_voyager_config_for_tlite
 from model import create_tlite_model
 from clustering import BehavioralClusteringUtils
 
@@ -15,7 +15,6 @@ def parse_args():
     parser.add_argument('--config', default='./configs/tlite.yaml', help='Path to configuration file')
     parser.add_argument('--debug', action='store_true', default=False, help='Debug mode with smaller dataset')
     parser.add_argument('--tb-dir', help='TensorBoard log directory')
-    parser.add_argument('--twilight', action='store_true', default=False, help='Train Twilight model instead of T-LITE')
     return parser.parse_args()
 
 def process_trace_file(trace_path, config, max_lines=None):
@@ -241,19 +240,20 @@ def process_trace_file(trace_path, config, max_lines=None):
     print(f"Train: {train_size}, Validation: {total_samples - train_size}")
     print(f"Used {current_clusters} clusters out of {config.num_clusters} available")
     
-    # Save page to cluster mapping for later use
+    # Save clustering information
     clustering_info = {
         'page_to_cluster': page_to_cluster,
-        'cluster_offset_transitions': cluster_offset_transitions
+        'cluster_offset_transitions': cluster_offset_transitions,
+        'cluster_successors': cluster_successors
     }
     
     return train_ds, valid_ds, clustering_info
 
 def main():
     args = parse_args()
-    #need delete您需要稍微修改main()函数，移除Twilight相关的步骤，直接保存聚类信息和T-LITE模型。还没弄
+    
     # Load configuration
-    config = extend_voyager_config_for_tlite(args.config)
+    config = load_config(args.config)
     
     # Set debug mode if requested
     if args.debug:
@@ -263,7 +263,7 @@ def main():
         max_lines = None
     
     # Process trace file
-    train_ds, valid_ds, page_successors = process_trace_file(
+    train_ds, valid_ds, clustering_info = process_trace_file(
         args.benchmark, config, max_lines
     )
     
@@ -274,14 +274,14 @@ def main():
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor='val_overall_accuracy',
-            patience=20,
+            patience=config.early_stopping_patience,
             restore_best_weights=True,
             mode='max'
         ),
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor='val_overall_accuracy',
-            factor=0.5,
-            patience=10,
+            factor=config.lr_decay_rate,
+            patience=config.early_stopping_patience // 2,
             min_lr=0.0001,
             mode='max'
         )
@@ -306,31 +306,13 @@ def main():
         verbose=1
     )
     
-    # Apply behavioral clustering if not Twilight
-    if not args.twilight:
-        print("Applying behavioral clustering...")
-        # Extract page embeddings
-        page_embeddings = model.get_weights()[0]  # Assuming first layer is page embedding
-        
-        # Cluster pages
-        cluster_map, centroids = BehavioralClusteringUtils.cluster_pages(
-            page_embeddings, num_clusters=config.num_clusters
-        )
-        
-        # Save clustering information
-        cluster_info = {
-            'cluster_map': cluster_map,
-            'centroids': centroids
-        }
-        np.save(os.path.join(args.model_path, 'clustering.npy'), cluster_info, allow_pickle=True)
-    
-    # Save model
+    # Save model and clustering information
     print(f"Saving model to {args.model_path}")
     model.save_weights(args.model_path)
     
-    # Save page successors information (for prefetch generation)
-    successors_path = os.path.join(os.path.dirname(args.model_path), 'successors.npy')
-    np.save(successors_path, page_successors, allow_pickle=True)
+    # Save clustering information
+    clustering_path = os.path.join(os.path.dirname(args.model_path), 'clustering.npy')
+    np.save(clustering_path, clustering_info, allow_pickle=True)
     
     print("Training complete!")
 
