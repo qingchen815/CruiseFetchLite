@@ -49,15 +49,21 @@ class TLITEPrefetcher:
         # Speculative prediction state
         self.previous_prefetch = None
         self.prefetch_was_correct = False
+        
+        self.current_pc = None  # 添加这一行来存储当前的PC值
     
-    def update_history(self, page, offset):
+    def update_history(self, page, offset, pc=None):
         '''
         Update access history with a new access
         
         Args:
             page: Page ID
             offset: Offset
+            pc: Program Counter (optional)
         '''
+        if pc is not None:
+            self.current_pc = pc
+        
         # 如果有聚类信息，将页面映射到对应的聚类
         if self.clustering_info is not None:
             page = self.clustering_info.get(page, 0)  # 默认使用聚类0
@@ -217,6 +223,27 @@ class TLITEPrefetcher:
         print(f"  Coverage: {self.get_coverage():.2f}%")
         print(f"  Metadata Size: {self.stats['metadata_size_kb']:.2f} KB")
         print(f"  Avg. Prediction Latency: {self.stats['prediction_latency_cycles'] / max(1, self.stats['accesses']):.2f} cycles")
+
+    def get_prefetches(self):
+        '''
+        获取预取建议
+        
+        Returns:
+            list: 包含 (candidate, offset) 元组的列表
+        '''
+        if self.current_pc is None:
+            return []
+            
+        prefetch_addr = self.generate_prefetch(self.current_pc)
+        if prefetch_addr is None:
+            return []
+            
+        # 将地址转换回 candidate 和 offset
+        prefetch_cacheline = prefetch_addr >> 6
+        candidate = prefetch_cacheline >> self.config.offset_bits
+        offset = prefetch_cacheline & ((1 << self.config.offset_bits) - 1)
+        
+        return [(candidate, offset)]
 
 
 class TwilightPrefetcher:
