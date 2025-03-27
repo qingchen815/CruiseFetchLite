@@ -163,7 +163,10 @@ class TLITE(tf.keras.Model):
         context_aware_offset = self.compute_context_aware_offset_embedding(
             cluster_history, offset_history, pc, training
         )
-        pc_embed = self.pc_embedding(pc)  # [batch, pc_embed_dim]
+        pc_embed = self.pc_embedding(pc)  # [batch, 1, pc_embed_dim]
+        
+        # 确保pc_embed是2D的 - 修复关键点
+        pc_embed = tf.reshape(pc_embed, [batch_size, self.pc_embed_size])
         
         # 展平DPF向量
         dpf_flat = tf.reshape(
