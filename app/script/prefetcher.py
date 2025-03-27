@@ -1,24 +1,26 @@
 import numpy as np
-from metadata import DPFMetadataManager
-from clustering import BehavioralClusteringUtils
 
+from script.metadata import DPFMetadataManager
+from script.clustering import BehavioralClusteringUtils
 class TLITEPrefetcher:
     '''
     T-LITE Prefetcher implementation
     '''
     
-    def __init__(self, model, config):
+    def __init__(self, model, config, clustering_info=None):
         '''
         Initialize the T-LITE prefetcher
         
         Args:
             model: Trained T-LITE model
             config: Configuration object
+            clustering_info: Clustering information for behavioral mapping (optional)
         '''
         self.model = model
         self.config = config
         self.metadata_manager = DPFMetadataManager(num_candidates=config.num_candidates)
         self.cluster_mapping_utils = BehavioralClusteringUtils()
+        self.clustering_info = clustering_info
         
         # History buffers
         self.page_history = []
@@ -56,6 +58,10 @@ class TLITEPrefetcher:
             page: Page ID
             offset: Offset
         '''
+        # 如果有聚类信息，将页面映射到对应的聚类
+        if self.clustering_info is not None:
+            page = self.clustering_info.get(page, 0)  # 默认使用聚类0
+        
         # Remove oldest entry
         self.page_history.pop(0)
         self.offset_history.pop(0)
@@ -101,7 +107,6 @@ class TLITEPrefetcher:
         self.update_history(page_id, offset)
         
         # Update metadata size stats
-
         self.stats['metadata_size_kb'] = self.metadata_manager.get_metadata_size_kb()
     
     def generate_prefetch(self, pc):
