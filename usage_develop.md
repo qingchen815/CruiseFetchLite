@@ -24,5 +24,5 @@ python train.py --benchmark /data/traces/471.omnetpp-s0.txt.xz --model-path /dat
 
 generate command
 
-python generate.py --model-path /data/models/tlite2_model --clustering-path /data/models/clustering.npy --benchmark /data/traces/471.omnetpp-s0.txt.xz --output /data/models/prefetch6.txt
+python generate.py --model-path /data/models/tlite2_model --clustering-path /data/models/clustering.npy --benchmark /data/traces/471.omnetpp-s0.txt.xz --output /data/models/prefetch13.txt
 
