@@ -226,10 +226,10 @@ class TLITEPrefetcher:
 
     def get_prefetches(self):
         '''
-        获取预取建议
+        Get prefetch suggestions
         
         Returns:
-            list: 包含 (candidate, offset) 元组的列表
+            list: List of (candidate, offset) tuples
         '''
         if self.current_pc is None:
             return []
@@ -238,7 +238,7 @@ class TLITEPrefetcher:
         if prefetch_addr is None:
             return []
             
-        # 将地址转换回 candidate 和 offset
+        # Convert address back to candidate and offset
         prefetch_cacheline = prefetch_addr >> 6
         candidate = prefetch_cacheline >> self.config.offset_bits
         offset = prefetch_cacheline & ((1 << self.config.offset_bits) - 1)

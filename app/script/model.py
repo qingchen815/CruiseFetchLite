@@ -1,6 +1,6 @@
 import tensorflow as tf
 import numpy as np
-import sys  # 用于调试输出
+import sys  # For debug output
 
 class TLITE(tf.keras.Model):
     '''
@@ -11,7 +11,7 @@ class TLITE(tf.keras.Model):
     def __init__(self, config):
         super(TLITE, self).__init__()
         
-        # 保存配置参数
+        # Save configuration parameters
         self.pc_embed_size = config.pc_embed_size           
         self.cluster_embed_size = config.cluster_embed_size  
         self.offset_embed_size = config.offset_embed_size    
@@ -24,38 +24,38 @@ class TLITE(tf.keras.Model):
         self.dpf_history_length = config.dpf_history_length  
         self.steps_per_epoch = config.steps_per_epoch        
         
-        # 跟踪训练状态的变量
+        # Variables to track training state
         self.step = 0
         self.epoch = 0
         
-        # 初始化模型组件
+        # Initialize model components
         self._init_embedding_layers()
         self._init_prediction_layers()
     
     def _init_embedding_layers(self):
-        '''初始化嵌入层'''
-        # PC嵌入层（限制为最常见的N个PC）
+        '''Initialize embedding layers'''
+        # PC embedding layer (limited to N most common PCs)
         self.pc_embedding = tf.keras.layers.Embedding(
             self.num_pcs, 
             self.pc_embed_size,
             embeddings_regularizer='l1'
         )
         
-        # 聚类嵌入层
+        # Cluster embedding layer
         self.cluster_embedding = tf.keras.layers.Embedding(
             self.num_clusters,
             self.cluster_embed_size,
             embeddings_regularizer='l1'
         )
         
-        # 偏移嵌入层（分为多个专家）
+        # Offset embedding layer (divided into multiple experts)
         self.offset_embedding = tf.keras.layers.Embedding(
             self.offset_size,
             self.offset_embed_size,
             embeddings_regularizer='l1'
         )
         
-        # 用于上下文感知偏移嵌入的多头注意力
+        # Multi-head attention for context-aware offset embedding
         self.mha = tf.keras.layers.MultiHeadAttention(
             num_heads=1,
             key_dim=self.cluster_embed_size,
@@ -63,15 +63,15 @@ class TLITE(tf.keras.Model):
         )
     
     def _init_prediction_layers(self):
-        '''初始化预测层'''
-        # 候选预测层（N+1输出用于N个候选+不预取选项）
+        '''Initialize prediction layers'''
+        # Candidate prediction layer (N+1 outputs for N candidates + no-prefetch option)
         self.candidate_fc = tf.keras.layers.Dense(
             self.num_candidates + 1,
             activation=None,
             kernel_regularizer='l1'
         )
         
-        # 偏移预测层
+        # Offset prediction layer
         self.offset_fc = tf.keras.layers.Dense(
             self.offset_size,
             activation=None,
@@ -80,46 +80,46 @@ class TLITE(tf.keras.Model):
     
     def compute_context_aware_offset_embedding(self, cluster_history, offset_history, pc, training=False):
         '''
-        计算上下文感知的偏移嵌入
-        通过融合聚类和PC上下文信息，使用专家混合方法
+        Compute context-aware offset embedding
+        Fuses clustering and PC context information using expert mixing method
         
         Args:
-            cluster_history: 聚类ID历史 [batch, history_length]
-            offset_history: 偏移历史 [batch, history_length]
-            pc: 加载PC [batch, 1]
-            training: 是否处于训练模式
+            cluster_history: Cluster ID history [batch, history_length]
+            offset_history: Offset history [batch, history_length]
+            pc: Load PC [batch, 1]
+            training: Whether in training mode
             
         Returns:
-            上下文感知的偏移嵌入 [batch, history_length, cluster_embed_size]
+            Context-aware offset embedding [batch, history_length, cluster_embed_size]
         '''
-        # 获取批次大小
+        # Get batch size
         batch_size = tf.shape(cluster_history)[0]
         
-        # 获取原始嵌入
+        # Get original embeddings
         cluster_embed = self.cluster_embedding(cluster_history)  # [batch, history, embed_dim]
         offset_embed = self.offset_embedding(offset_history)     # [batch, history, offset_embed_size]
         
-        # 调试时打印形状
+        # Print shapes for debugging
         # tf.print("batch_size:", batch_size, "history_length:", self.history_length, 
         #          "cluster_embed shape:", tf.shape(cluster_embed),
         #          "offset_embed shape:", tf.shape(offset_embed),
         #          output_stream=sys.stderr)
         
-        # 重塑偏移嵌入为专家格式
+        # Reshape offset embedding for expert format
         offset_embed = tf.reshape(
             offset_embed, 
             [batch_size, self.history_length, self.num_experts, self.cluster_embed_size]
         )
         
-        # 准备查询 - 只使用聚类嵌入作为查询
-        # 这种简化方法避免了过去连接操作导致的维度不匹配问题
+        # Prepare query - using only cluster embedding as query
+        # This simplified method avoids dimension mismatch issues from past concatenation operations
         query = tf.reshape(
             cluster_embed, 
             [batch_size, self.history_length, 1, self.cluster_embed_size]
         )
         
-        # 应用注意力机制获取加权偏移嵌入
-        # 调试时可以打印查询和值的形状
+        # Apply attention mechanism to get weighted offset embedding
+        # Print query and value shapes for debugging
         # tf.print("query shape:", tf.shape(query), "value shape:", tf.shape(offset_embed), output_stream=sys.stderr)
         
         context_aware_offset = self.mha(
@@ -128,7 +128,7 @@ class TLITE(tf.keras.Model):
             training=training
         )
         
-        # 重塑为最终嵌入维度
+        # Reshape to final embedding dimensions
         context_aware_offset = tf.reshape(
             context_aware_offset, 
             [batch_size, self.history_length, self.cluster_embed_size]
@@ -138,73 +138,73 @@ class TLITE(tf.keras.Model):
     
     def call(self, inputs, training=False):
         '''
-        模型前向传播
+        Model forward pass
         
         Args:
-            inputs: 元组 (cluster_history, offset_history, pc, dpf_vectors)
-                - cluster_history: 聚类ID历史 [batch, history_length]
-                - offset_history: 偏移历史 [batch, history_length]
-                - pc: 加载PC [batch, 1]
-                - dpf_vectors: DPF分布向量 [batch, dpf_history_length, num_candidates]
-            training: 是否处于训练模式
+            inputs: Tuple (cluster_history, offset_history, pc, dpf_vectors)
+                - cluster_history: Cluster ID history [batch, history_length]
+                - offset_history: Offset history [batch, history_length]
+                - pc: Load PC [batch, 1]
+                - dpf_vectors: DPF distribution vectors [batch, dpf_history_length, num_candidates]
+            training: Whether in training mode
             
         Returns:
-            candidate_logits: 候选预测logits [batch, num_candidates+1]
-            offset_logits: 偏移预测logits [batch, offset_size]
+            candidate_logits: Candidate prediction logits [batch, num_candidates+1]
+            offset_logits: Offset prediction logits [batch, offset_size]
         '''
-        # 解包输入
+        # Unpack inputs
         cluster_history, offset_history, pc, dpf_vectors = inputs
         
-        # 获取批次大小用于一致的维度处理
+        # Get batch size for consistent dimension handling
         batch_size = tf.shape(cluster_history)[0]
         
-        # 计算嵌入
+        # Calculate embeddings
         cluster_embed = self.cluster_embedding(cluster_history)  # [batch, history, embed_dim]
         context_aware_offset = self.compute_context_aware_offset_embedding(
             cluster_history, offset_history, pc, training
         )
         pc_embed = self.pc_embedding(pc)  # [batch, 1, pc_embed_dim]
         
-        # 确保pc_embed是2D的 - 修复关键点
+        # Ensure pc_embed is 2D - fix key point
         pc_embed = tf.reshape(pc_embed, [batch_size, self.pc_embed_size])
         
-        # 展平DPF向量
+        # Flatten DPF vectors
         dpf_flat = tf.reshape(
             dpf_vectors, 
             [batch_size, self.dpf_history_length * self.num_candidates]
         )
         
-        # 展平嵌入
+        # Flatten embeddings
         cluster_flat = tf.reshape(cluster_embed, [batch_size, self.history_length * self.cluster_embed_size])
         offset_flat = tf.reshape(context_aware_offset, [batch_size, self.history_length * self.cluster_embed_size])
         
-        # 连接所有特征
+        # Concatenate all features
         combined_features = tf.concat([
-            pc_embed,     # PC嵌入
-            cluster_flat, # 聚类历史嵌入
-            offset_flat,  # 上下文感知的偏移嵌入
-            dpf_flat      # DPF分布向量
+            pc_embed,     # PC embedding
+            cluster_flat, # Cluster history embedding
+            offset_flat,  # Context-aware offset embedding
+            dpf_flat      # DPF distribution vectors
         ], axis=1)
         
-        # 生成预测
+        # Generate predictions
         candidate_logits = self.candidate_fc(combined_features)
         offset_logits = self.offset_fc(combined_features)
         
         return candidate_logits, offset_logits
     
     def train_step(self, data):
-        '''自定义训练步骤，更新内部计数器'''
-        # 解包数据
+        '''Custom training step, updates internal counters'''
+        # Unpack data
         x, y = data
         
-        # 前向传播
+        # Forward pass
         with tf.GradientTape() as tape:
             candidate_logits, offset_logits = self(x, training=True)
             
-            # 解包真实标签
+            # Unpack ground truth labels
             candidate_labels, offset_labels = y
             
-            # 计算损失
+            # Calculate losses
             candidate_loss = tf.keras.losses.SparseCategoricalCrossentropy(
                 from_logits=True
             )(candidate_labels, candidate_logits)
@@ -213,69 +213,69 @@ class TLITE(tf.keras.Model):
                 from_logits=True
             )(offset_labels, offset_logits)
             
-            # 总损失
+            # Total loss
             total_loss = candidate_loss + offset_loss
         
-        # 计算梯度并更新权重
+        # Calculate gradients and update weights
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(total_loss, trainable_vars)
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
         
-        # 更新内部计数器
+        # Update internal counters
         self.step += 1
         if self.step >= self.steps_per_epoch:
             self.step = 0
             self.epoch += 1
         
-        # 更新指标
+        # Update metrics
         self.compiled_metrics.update_state(y, (candidate_logits, offset_logits))
         
-        # 返回指标
+        # Return metrics
         results = {m.name: m.result() for m in self.metrics}
         results['loss'] = total_loss
         
         return results
     
     def load(self, model_path):
-        '''加载模型权重'''
+        '''Load model weights'''
         self.load_weights(model_path).expect_partial()
     
     def save(self, model_path):
-        '''保存模型权重'''
+        '''Save model weights'''
         self.save_weights(model_path)
     
     def quantize(self, bits=8):
         '''
-        将模型权重量化为指定位数的精度
+        Quantize model weights to specified bit precision
         
-        这是一个简单实现 - 生产环境应使用TF的量化API
+        This is a simple implementation - production should use TF's quantization API
         
         Args:
-            bits: 量化精度位数
+            bits: Quantization precision in bits
             
         Returns:
-            包含量化信息的字典
+            Dictionary containing quantization information
         '''
-        # 获取所有权重
+        # Get all weights
         weights = self.get_weights()
         quantized_weights = []
         
         for w in weights:
-            # 基于最小/最大值计算缩放因子
+            # Calculate scaling factor based on min/max values
             w_min = np.min(w)
             w_max = np.max(w)
             scale = (w_max - w_min) / (2**bits - 1)
             
-            # 量化
-            if scale > 0:  # 防止除零错误
+            # Quantize
+            if scale > 0:  # Prevent division by zero
                 w_quant = np.round((w - w_min) / scale).astype(np.int8)
             else:
                 w_quant = np.zeros_like(w, dtype=np.int8)
             
-            # 存储量化权重
+            # Store quantized weights
             quantized_weights.append(w_quant)
         
-        # 设置量化权重
+        # Set quantized weights
         self.set_weights(quantized_weights)
         
         return {
@@ -287,49 +287,49 @@ class TLITE(tf.keras.Model):
 
 def create_tlite_model(config):
     '''
-    创建并编译T-LITE模型
+    Create and compile T-LITE model
     
     Args:
-        config: 包含模型超参数的配置对象
+        config: Configuration object containing model hyperparameters
         
     Returns:
-        编译好的T-LITE模型
+        Compiled T-LITE model
     '''
-    # 创建模型
+    # Create model
     model = TLITE(config)
     
-    # 使用小批次测试模型结构
-    batch_size = 2  # 使用>1的批次大小以测试批次处理逻辑
+    # Use small batch to test model structure
+    batch_size = 2  # Use batch size >1 to test batch processing logic
     
-    # 定义测试输入构建模型
+    # Define test inputs to build model
     dummy_cluster_history = tf.zeros((batch_size, model.history_length), dtype=tf.int32)
     dummy_offset_history = tf.zeros((batch_size, model.history_length), dtype=tf.int32)
     dummy_pc = tf.zeros((batch_size, 1), dtype=tf.int32)
     dummy_dpf = tf.zeros((batch_size, model.dpf_history_length, model.num_candidates), dtype=tf.float32)
     
-    # 构建模型
-    # 启用调试时取消注释以下行
+    # Build model
+    # Uncomment following line for debugging
     # tf.print("Testing model with batch size:", batch_size, output_stream=sys.stderr)
     model((dummy_cluster_history, dummy_offset_history, dummy_pc, dummy_dpf))
     
-    # 导入指标
+    # Import metrics
     try:
         from metrics import CandidateAccuracy, OffsetAccuracy, OverallAccuracy
         
-        # 定义指标
+        # Define metrics
         metrics = [
             CandidateAccuracy(), 
             OffsetAccuracy(),
             OverallAccuracy()
         ]
     except ImportError:
-        print("警告: 未能导入指标模块，将使用默认指标")
+        print("Warning: Could not import metrics module, using default metrics")
         metrics = ['accuracy']
     
-    # 编译模型
+    # Compile model
     model.compile(
         optimizer=tf.keras.optimizers.Adam(config.learning_rate),
-        loss=None,  # 损失在train_step中计算
+        loss=None,  # Loss is calculated in train_step
         metrics=metrics
     )
     

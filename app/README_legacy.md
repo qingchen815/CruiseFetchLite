@@ -1,14 +1,15 @@
-# T-LITE2: A Lightweight Neural Prefetcher
+# CruiseFetchLite: A Lightweight Neural Prefetcher
 
-T-LITE2 is a lightweight neural prefetcher that uses behavioral clustering and frequency-based candidate selection to predict memory accesses. It is designed to be efficient, accurate, and easy to integrate into existing systems.
+CruiseFetchLite is a lightweight neural prefetcher that uses behavioral clustering and frequency-based candidate selection to predict memory accesses. It is designed to be efficient, accurate, and easy to integrate into existing systems.
 
 ## Features
 
 - Behavioral clustering for efficient page grouping
 - Frequency-based candidate selection
-- Mixture-of-experts architecture for context-aware predictions
+- Multi-stream prefetching with dynamic load balancing
+- Context-aware predictions using attention mechanism
 - Configurable model size and performance parameters
-- Support for both training and inference
+- Support for both static and dynamic page-to-cluster mapping
 - Docker support for easy deployment
 
 ## Installation
@@ -20,25 +21,13 @@ T-LITE2 is a lightweight neural prefetcher that uses behavioral clustering and f
 docker build -t tlite2 .
 ```
 
-2. Run the container:
+2. Run the container with local directory mounting (recommended for development):
 ```bash
-docker run -it --gpus all -v /path/to/data:/data tlite2
+docker run -it --gpus all -v /path/to/local/dir:/app tlite2
 ```
-docker run -it --gpus all -v /path/to/data:/data tlite2 /bin/bash
 
-2. 避免 rebuild，直接挂载修改后的文件
-与其每次修改后 rebuild 镜像，可以直接挂载本地目录，像你之前那样运行容器：
+This mounting approach (-v) allows you to modify code without rebuilding the container.
 
-bash
-
-收起
-
-自动换行
-
-复制
-docker run -it --gpus all -v D:\TLITE2:/app tlite2
-原理：-v D:\TLITE2:/app 将本地目录挂载到容器内的 /app，修改本地文件后无需 rebuild，容器会直接使用最新版本。
-适用场景：开发阶段，频繁修改代码时。
 ### Manual Installation
 
 1. Clone the repository:
@@ -54,95 +43,63 @@ pip install -r requirements.txt
 
 ## Usage
 
-### Training
-
-To train the T-LITE model on a memory trace: !
-
-```bash
-docker run -it --gpus all \
-    -v $(pwd)/data:/data \
-    tlite2 python train.py \
-    --benchmark /data/traces/471.omnetpp-s0.txt.xz \
-    --model-path /data/models/tlite2_model \
-    --config /app/config/TLITE2debug1.yaml \
-    --debug \
-    --tb-dir /data/models/tensorboard_logs
-```
-single line version :
-docker run -it --gpus all -v (Get-Location).Path/data:/data tlite2 python train.py --benchmark /data/traces/471.omnetpp-s0.txt.xz --model-path /data/models/tlite2_model --config /app/config/TLITE2debug1.yaml --debug --tb-dir /data/models/tensorboard_logs
-
 ### Generating Prefetches
 
 To generate prefetch files using a trained model:
 
 ```bash
-docker run -it --gpus all \
-    -v $(pwd)/data:/data \
-    tlite2 python generate.py \
+python generate.py \
+    --model-path /data/models/tlite2_model \
+    --clustering-path /data/models/clustering.npy \
+    --benchmark /data/traces/471.omnetpp-s0.txt.xz \
+    --output /data/models/prefetch.txt \
+    --config ./config/TLITE2debug1.yaml
+```
+
+Or using Docker:
+```bash
+docker run -it --gpus all -v $(pwd)/data:/data tlite2 python generate.py \
     --model-path /data/models/tlite2_model \
     --clustering-path /data/models/clustering.npy \
     --benchmark /data/traces/471.omnetpp-s0.txt.xz \
     --output /data/models/prefetch.txt
 ```
-single line version:
-docker run -it --gpus all -v $(pwd)/data:/data tlite2 python generate.py --model-path /data/models/tlite2_model --clustering-path /data/models/clustering.npy --benchmark /data/traces/471.omnetpp-s0.txt.xz --output /data/models/prefetch.txt
-
-
-### Example Usage
-
-Run the example script to test the model with synthetic data:
-
-```bash
-python example.py --simulate
-```
 
 ## Configuration
 
-The model can be configured through a YAML file. See `configs/baseTLITE2.yaml` for all available parameters:
+The model can be configured through a YAML file. Key parameters include:
 
-### Key Parameters
+### Model Parameters
+- `num_clusters`: Number of behavioral clusters
+- `history_length`: Number of history entries to consider
+- `num_candidates`: Number of candidate pages for prefetching
+- `offset_bits`: Number of bits for offset calculation
 
-- `num_clusters`: Number of behavioral clusters (default: 4096)
-- `history_length`: Number of history entries to consider (default: 3)
-- `num_candidates`: Number of candidate pages for prefetching (default: 4)
-- `learning_rate`: Initial learning rate (default: 0.001)
-- `batch_size`: Training batch size (default: 256)
-- `epochs`: Maximum number of training epochs (default: 500)
+### Stream Management
+- `num_streams`: Number of parallel prefetching streams (default: 32)
+- `batch_size`: Processing batch size (default: 50000)
 
-### Memory Management
-
-- `max_pages`: Maximum number of pages to track
-- `cache_size_kb`: Size of metadata cache
-- `cache_ways`: Number of ways in metadata cache
-
-### Performance Tuning
-
-- `enable_profiling`: Enable detailed performance profiling
-- `profile_interval`: Number of accesses between profile snapshots
-- `num_workers`: Number of worker threads for data processing
+### Performance Optimization
+- `enable_jit`: Enable TensorFlow JIT compilation
+- `enable_debug`: Enable detailed debug outputs
+- `stream_rebalance_interval`: Interval for checking stream load balance
 
 ## Project Structure
 
 ```
-TLITE2/
+CruiseFetchLite/
 ├── app/
-│   ├── config/XXX.yaml
-│   ├── script/
-│   │   ├── __init__.py
-│   │   ├── config.py
-│   │   ├── clustering.py
-│   │   ├── example.py
-│   │   ├── init.py
-│   │   ├── metadata.py
-│   │   ├── metrics.py
-│   │   ├── model.py
-│   │   └── prefetcher.py
-│   ├── train.py
-│   ├── generate.py
-│   └── requirements.txt
+│ ├── config/
+│ │ └── TLITE2debug1.yaml
+│ ├── script/
+│ │ ├── model.py # Neural network model implementation
+│ │ ├── prefetcher.py # Prefetcher implementation
+│ │ ├── metadata.py # Metadata management
+│ │ └── config.py # Configuration handling
+│ └── generate.py # Main prefetch generation script
 ├── data/
-│   ├── traces/
-│   └── models/
+│ ├── traces/ # Memory access traces
+│ └── models/ # Trained models and outputs
 └── Dockerfile
 ```
 
@@ -155,28 +112,57 @@ The model tracks several performance metrics:
 - Prediction Latency: Average time to generate predictions
 - Metadata Size: Size of clustering and metadata information
 
-## Contributing
+## Performance Features
 
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
+### Multi-Stream Processing
+- Parallel processing using multiple independent prefetching streams
+- Dynamic load balancing across streams
+- Stream allocation based on PC and address hashing
+
+### Clustering Management
+- Static clustering from pre-trained model
+- Dynamic clustering for new pages
+- Efficient page-to-cluster mapping
+
+### Optimization Techniques
+- Batch processing for GPU efficiency
+- Pre-allocated arrays for reduced memory allocation
+- JIT compilation for improved performance
+- Vectorized operations for prediction processing
+
+## Monitoring and Debug Features
+
+The system provides detailed monitoring capabilities:
+- Stream load distribution statistics
+- Prefetch generation rates
+- Clustering mapping effectiveness
+- Memory usage and batch processing statistics
 
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Setup Data Directory
+
+```bash
+mkdir -p data/traces data/models
+cp your_trace_file.txt.xz data/traces/
+```
+
+## Note
+
+This is an active development project. For the latest features and updates, please check the repository regularly.
 
 ## Citation
 
 If you use T-LITE2 in your research, please cite:
 
 ```bibtex
-@software{tlite2,
-  title = {T-LITE2: A Lightweight Neural Prefetcher},
+@software{CruiseFetchLite,
+  title = {CruiseFetchLite: A Lightweight Neural Prefetcher},
   author = {Your Name},
   year = {2024},
-  url = {https://github.com/yourusername/TLITE2}
+  url = {https://github.com/KevinMedicine26/CruiseFetchLite}
 }
 ```
 
