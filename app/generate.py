@@ -26,27 +26,95 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
     print(f"处理轨迹文件: {trace_path}")
     print(f"输出文件: {output_path}")
     
-    # 初始化多流预取器
-    num_streams = 16
-    prefetchers = [TLITEPrefetcher(
-        model=model,
-        clustering_info=clustering_info,
-        config=config
-    ) for _ in range(num_streams)]
+    # 分析聚类信息
+    page_to_cluster = clustering_info.get('page_to_cluster', {})
+    if page_to_cluster:
+        cluster_pages = list(page_to_cluster.keys())
+        min_page = min(cluster_pages)
+        max_page = max(cluster_pages)
+        print(f"\n=== 聚类信息分析 ===")
+        print(f"页面ID范围: {min_page:x} - {max_page:x}")
+        print(f"聚类数量: {len(set(page_to_cluster.values()))}")
+        print(f"映射页面数: {len(page_to_cluster)}")
     
-    # 预热过程
+    # 创建动态聚类映射器
+    class DynamicClusterMapper:
+        def __init__(self, static_mapping, num_clusters):
+            self.static_mapping = static_mapping
+            self.dynamic_mapping = {}
+            self.num_clusters = num_clusters
+            self.stats = {'static_hits': 0, 'dynamic_hits': 0, 'new_mappings': 0}
+        
+        def get_cluster(self, page_id):
+            # 尝试静态映射
+            if page_id in self.static_mapping:
+                self.stats['static_hits'] += 1
+                return self.static_mapping[page_id]
+            
+            # 尝试动态映射
+            if page_id in self.dynamic_mapping:
+                self.stats['dynamic_hits'] += 1
+                return self.dynamic_mapping[page_id]
+            
+            # 创建新映射
+            new_cluster = hash(page_id) % self.num_clusters
+            self.dynamic_mapping[page_id] = new_cluster
+            self.stats['new_mappings'] += 1
+            return new_cluster
+        
+        def print_stats(self):
+            total = sum(self.stats.values())
+            if total > 0:
+                print("\n映射统计:")
+                print(f"- 静态映射命中: {self.stats['static_hits']} ({self.stats['static_hits']/total*100:.2f}%)")
+                print(f"- 动态映射命中: {self.stats['dynamic_hits']} ({self.stats['dynamic_hits']/total*100:.2f}%)")
+                print(f"- 新建映射数: {self.stats['new_mappings']} ({self.stats['new_mappings']/total*100:.2f}%)")
+    
+    # 初始化多流预取器和映射器
+    num_streams = 16
+    prefetchers = []
+    mappers = []
+    
+    for i in range(num_streams):
+        prefetcher = TLITEPrefetcher(
+            model=model,
+            clustering_info=clustering_info,
+            config=config
+        )
+        mapper = DynamicClusterMapper(page_to_cluster, config.num_clusters)
+        prefetchers.append(prefetcher)
+        mappers.append(mapper)
+    
+    # 预热过程改进
     print("\n=== 预取器预热 ===")
-    for stream_id, prefetcher in enumerate(prefetchers):
+    for stream_id, (prefetcher, mapper) in enumerate(zip(prefetchers, mappers)):
         print(f"预热流 {stream_id}...")
+        prev_page = None
+        prev_offset = None
+        
         for i in range(10):
-            fake_page = i + 1
+            # 使用更真实的页面ID
+            fake_page = (i + 1) * 1000  # 使用较大的间隔
             fake_offset = i % 64
             fake_pc = i * 1000
-            prefetcher.update_history(fake_page, fake_offset, fake_pc)
-            if i > 0:
+            
+            # 获取页面的聚类ID
+            cluster_id = mapper.get_cluster(fake_page)
+            
+            # 更新预取器状态
+            prefetcher.update_history(cluster_id, fake_offset, fake_pc)
+            
+            # 更新元数据
+            if prev_page is not None:
                 prefetcher.metadata_manager.update_page_access(
-                    i, fake_page, (i-1) % 64, fake_offset
+                    mapper.get_cluster(prev_page),
+                    cluster_id,
+                    prev_offset,
+                    fake_offset
                 )
+            
+            prev_page = fake_page
+            prev_offset = fake_offset
         
         if stream_id < 3:
             print(f"流 {stream_id} 预热后状态:")
@@ -101,32 +169,35 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
             pc = int(split[3], 16)
             addr = int(split[2], 16)
             
+            # 计算页面和偏移
             page = (addr >> 6) >> config.offset_bits
             offset = (addr >> 6) & ((1 << config.offset_bits) - 1)
             
+            # 确定流ID
             stream_id = (pc >> 4) % num_streams
+            prefetcher = prefetchers[stream_id]
+            mapper = mappers[stream_id]
             
-            # 调试输出：显示页面历史更新
+            # 获取页面的聚类ID
+            cluster_id = mapper.get_cluster(page)
+            
+            # 调试输出
             if processed_lines < 100 and processed_lines % 10 == 0:
                 print(f"\n更新前流 {stream_id} 状态:")
-                print(f"- 页面历史: {prefetchers[stream_id].page_history}")
-                print(f"- 元数据大小: {prefetchers[stream_id].metadata_manager.get_metadata_size_kb():.2f} KB")
+                print(f"- 原始页面: {page:x}")
+                print(f"- 映射聚类: {cluster_id}")
+                print(f"- 页面历史: {prefetcher.page_history}")
+                print(f"- 元数据大小: {prefetcher.metadata_manager.get_metadata_size_kb():.2f} KB")
             
             # 更新状态和元数据
-            prefetchers[stream_id].update_history(page, offset, pc)
-            if prefetchers[stream_id].page_history[-2] != 0:
-                prefetchers[stream_id].metadata_manager.update_page_access(
-                    prefetchers[stream_id].page_history[-2],
-                    page,
-                    prefetchers[stream_id].offset_history[-2],
+            prefetcher.update_history(cluster_id, offset, pc)
+            if prefetcher.page_history[-2] != 0:
+                prefetcher.metadata_manager.update_page_access(
+                    prefetcher.page_history[-2],
+                    cluster_id,
+                    prefetcher.offset_history[-2],
                     offset
                 )
-            
-            # 调试输出：显示更新后状态
-            if processed_lines < 100 and processed_lines % 10 == 0:
-                print(f"更新后流 {stream_id} 状态:")
-                print(f"- 页面历史: {prefetchers[stream_id].page_history}")
-                print(f"- 元数据大小: {prefetchers[stream_id].metadata_manager.get_metadata_size_kb():.2f} KB")
             
             # 收集批处理数据
             pages_batch.append(page)
@@ -253,6 +324,12 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
             print(f"- 总更新次数: {stats['updates']}")
             print(f"- 总预取数: {stats['prefetches']}")
             print(f"- 预取率: {stats['prefetches']/stats['updates']*100:.2f}%")
+
+    # 打印映射统计
+    print("\n=== 映射统计 ===")
+    for stream_id, mapper in enumerate(mappers):
+        print(f"\n流 {stream_id} 的映射统计:")
+        mapper.print_stats()
 
 def main():
     args = parse_args()
