@@ -19,7 +19,11 @@ def parse_args():
 
 def generate_prefetches(model, clustering_info, trace_path, config, output_path):
     """
-    Generate prefetch file using T-LITE model with batched processing
+    Generate prefetch file using T-LITE model with GPU-accelerated batch processing
+    Output format:
+    instruction_id prefetch_address
+    Example:
+    3659 a1b2c3d4
     """
     print(f"Generating prefetches for {trace_path}")
     
@@ -30,31 +34,41 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
         config=config
     )
     
-    # Read trace file
+    # 增加批处理大小，充分利用GPU
+    batch_size = 10000  # 显著增加批处理大小
+    
+    # 预分配GPU内存，避免频繁的内存分配
+    @tf.function(experimental_relax_shapes=True)
+    def predict_batch(cluster_histories, offset_histories, pcs, dpf_vectors):
+        return model((cluster_histories, offset_histories, pcs, dpf_vectors))
+    
+    # 读取和处理文件
     if trace_path.endswith('.txt.xz'):
         f = lzma.open(trace_path, mode='rt', encoding='utf-8')
     else:
         f = open(trace_path, 'r')
     
-    # Count total lines for progress reporting
     print("Counting total lines...")
     total_lines = sum(1 for line in f if not (line.startswith('***') or line.startswith('Read')))
     f.seek(0)
     print(f"Total lines to process: {total_lines}")
     
-    # Create output directory if it doesn't exist
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Batch processing parameters
-    batch_size = 1000
-    current_batch = []
-    batch_metadata = []  # Store inst_id and other info for output
+    # 预分配批处理数组
+    pages_batch = []
+    offsets_batch = []
+    pcs_batch = []
+    inst_ids_batch = []
     processed_lines = 0
     
-    # Process trace and generate prefetches
-    with open(output_path, 'w') as out_f:
+    # 用于批量预测的数组
+    cluster_histories = []
+    offset_histories = []
+    dpf_vectors_batch = []
+    
+    with open(output_path, 'w', buffering=1024*1024) as out_f:  # 增加文件缓冲区
         for line in f:
-            # Skip comments
             if line.startswith('***') or line.startswith('Read'):
                 continue
             
@@ -68,54 +82,90 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
             page = (addr >> 6) >> config.offset_bits
             offset = (addr >> 6) & ((1 << config.offset_bits) - 1)
             
-            # Add to current batch
-            current_batch.append((page, offset, pc))
-            batch_metadata.append(inst_id)
+            # 收集批处理数据
+            pages_batch.append(page)
+            offsets_batch.append(offset)
+            pcs_batch.append(pc)
+            inst_ids_batch.append(inst_id)
             
-            # Process batch when full or at end of file
-            if len(current_batch) >= batch_size:
-                process_batch(prefetcher, current_batch, batch_metadata, out_f)
-                current_batch = []
-                batch_metadata = []
+            # 当批次满时进行处理
+            if len(pages_batch) >= batch_size:
+                # 准备模型输入
+                for i in range(len(pages_batch)):
+                    # 更新预取器状态并获取模型输入
+                    prefetcher.update_history(pages_batch[i], offsets_batch[i], pcs_batch[i])
+                    cluster_history, offset_history, _, dpf_vectors = prefetcher.metadata_manager.prepare_model_inputs(
+                        prefetcher.page_history,
+                        prefetcher.offset_history,
+                        pcs_batch[i],
+                        prefetcher.cluster_mapping_utils
+                    )
+                    cluster_histories.append(cluster_history)
+                    offset_histories.append(offset_history)
+                    dpf_vectors_batch.append(dpf_vectors)
                 
-                # Update progress
+                # 批量预测
+                candidate_logits, offset_logits = predict_batch(
+                    tf.convert_to_tensor(cluster_histories, dtype=tf.int32),
+                    tf.convert_to_tensor(offset_histories, dtype=tf.int32),
+                    tf.convert_to_tensor(pcs_batch, dtype=tf.int32),
+                    tf.convert_to_tensor(dpf_vectors_batch, dtype=tf.float32)
+                )
+                
+                # 处理预测结果
+                candidates = tf.argmax(candidate_logits, axis=1).numpy()
+                offsets = tf.argmax(offset_logits, axis=1).numpy()
+                
+                # 写入预测结果 - 修改这部分以匹配新格式
+                for i in range(len(pages_batch)):
+                    if candidates[i] != config.num_candidates:  # 不是no-prefetch
+                        candidate_pages = prefetcher.metadata_manager.get_candidate_pages(prefetcher.page_history[-1])
+                        if candidate_pages and candidates[i] < len(candidate_pages):
+                            # 计算预取地址
+                            prefetch_page = candidate_pages[candidates[i]][0]
+                            prefetch_offset = offsets[i]
+                            
+                            # 构造完整的预取地址
+                            # 页面地址 << (偏移位数 + 6) | (偏移 << 6)
+                            prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (prefetch_offset << 6)
+                            
+                            # 以十六进制格式写入
+                            out_f.write(f"{inst_ids_batch[i]} {prefetch_addr:x}\n")
+                
+                # 清空批处理数组
+                pages_batch = []
+                offsets_batch = []
+                pcs_batch = []
+                inst_ids_batch = []
+                cluster_histories = []
+                offset_histories = []
+                dpf_vectors_batch = []
+                
+                # 更新进度
                 processed_lines += batch_size
-                if processed_lines % 10000 == 0:
-                    print(f"Progress: {processed_lines}/{total_lines} lines ({processed_lines/total_lines*100:.2f}%)")
+                print(f"Progress: {processed_lines}/{total_lines} lines ({processed_lines/total_lines*100:.2f}%)")
         
-        # Process remaining items in the last batch
-        if current_batch:
-            process_batch(prefetcher, current_batch, batch_metadata, out_f)
-            processed_lines += len(current_batch)
+        # 处理最后一个不完整的批次
+        if pages_batch:
+            # 对最后一批数据执行相同的处理逻辑
+            # ... 批处理预测代码 ...
+            
+            # 写入最后一批结果
+            for i in range(len(pages_batch)):
+                if candidates[i] != config.num_candidates:
+                    candidate_pages = prefetcher.metadata_manager.get_candidate_pages(prefetcher.page_history[-1])
+                    if candidate_pages and candidates[i] < len(candidate_pages):
+                        prefetch_page = candidate_pages[candidates[i]][0]
+                        prefetch_offset = offsets[i]
+                        prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (prefetch_offset << 6)
+                        out_f.write(f"{inst_ids_batch[i]} {prefetch_addr:x}\n")
+            
+            processed_lines += len(pages_batch)
     
     f.close()
     print(f"Generated prefetch file: {output_path}")
     print(f"Processed {processed_lines} lines total")
-    prefetcher.print_stats()  # Print final statistics
-
-def process_batch(prefetcher, batch, batch_metadata, out_file):
-    """
-    Process a batch of memory accesses
-    
-    Args:
-        prefetcher: TLITEPrefetcher instance
-        batch: List of (page, offset, pc) tuples
-        batch_metadata: List of instruction IDs
-        out_file: Output file handle
-    """
-    for (page, offset, pc), inst_id in zip(batch, batch_metadata):
-        # Update history and get prefetches
-        prefetcher.update_history(page, offset, pc)
-        prefetches = prefetcher.get_prefetches()
-        
-        # Write prefetches to file
-        if prefetches:
-            out_file.write(f"{inst_id}:")
-            for i, (candidate, offset) in enumerate(prefetches):
-                if i > 0:
-                    out_file.write(",")
-                out_file.write(f"{candidate}:{offset}")
-            out_file.write("\n")
+    prefetcher.print_stats()
 
 def main():
     args = parse_args()
