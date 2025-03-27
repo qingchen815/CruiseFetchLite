@@ -27,18 +27,32 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
     print(f"输出文件: {output_path}")
     
     # 初始化多流预取器
-    num_streams = 16  # 可配置的流数量
+    num_streams = 16
     prefetchers = [TLITEPrefetcher(
         model=model,
         clustering_info=clustering_info,
         config=config
     ) for _ in range(num_streams)]
     
-    print(f"\n=== 多流预取器初始化 ===")
-    print(f"流数量: {num_streams}")
-    print(f"每个流的初始状态示例（流0）：")
-    print(f"- 页面历史：{prefetchers[0].page_history}")
-    print(f"- 偏移历史：{prefetchers[0].offset_history}")
+    # 预热过程
+    print("\n=== 预取器预热 ===")
+    for stream_id, prefetcher in enumerate(prefetchers):
+        print(f"预热流 {stream_id}...")
+        for i in range(10):
+            fake_page = i + 1
+            fake_offset = i % 64
+            fake_pc = i * 1000
+            prefetcher.update_history(fake_page, fake_offset, fake_pc)
+            if i > 0:
+                prefetcher.metadata_manager.update_page_access(
+                    i, fake_page, (i-1) % 64, fake_offset
+                )
+        
+        if stream_id < 3:
+            print(f"流 {stream_id} 预热后状态:")
+            print(f"- 页面历史: {prefetcher.page_history}")
+            print(f"- 偏移历史: {prefetcher.offset_history}")
+            print(f"- 元数据大小: {prefetcher.metadata_manager.get_metadata_size_kb():.2f} KB")
     
     # 批处理大小
     batch_size = 30000
@@ -87,16 +101,32 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
             pc = int(split[3], 16)
             addr = int(split[2], 16)
             
-            # 计算页面和偏移
             page = (addr >> 6) >> config.offset_bits
             offset = (addr >> 6) & ((1 << config.offset_bits) - 1)
             
-            # 确定流ID - 使用PC的高位
             stream_id = (pc >> 4) % num_streams
             
-            # 更新对应流的状态
+            # 调试输出：显示页面历史更新
+            if processed_lines < 100 and processed_lines % 10 == 0:
+                print(f"\n更新前流 {stream_id} 状态:")
+                print(f"- 页面历史: {prefetchers[stream_id].page_history}")
+                print(f"- 元数据大小: {prefetchers[stream_id].metadata_manager.get_metadata_size_kb():.2f} KB")
+            
+            # 更新状态和元数据
             prefetchers[stream_id].update_history(page, offset, pc)
-            stream_stats[stream_id]['updates'] += 1
+            if prefetchers[stream_id].page_history[-2] != 0:
+                prefetchers[stream_id].metadata_manager.update_page_access(
+                    prefetchers[stream_id].page_history[-2],
+                    page,
+                    prefetchers[stream_id].offset_history[-2],
+                    offset
+                )
+            
+            # 调试输出：显示更新后状态
+            if processed_lines < 100 and processed_lines % 10 == 0:
+                print(f"更新后流 {stream_id} 状态:")
+                print(f"- 页面历史: {prefetchers[stream_id].page_history}")
+                print(f"- 元数据大小: {prefetchers[stream_id].metadata_manager.get_metadata_size_kb():.2f} KB")
             
             # 收集批处理数据
             pages_batch.append(page)
@@ -109,12 +139,13 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
             if len(pages_batch) >= batch_size:
                 print(f"\n--- 处理批次 {processed_lines//batch_size + 1} ---")
                 
-                # 准备每个流的输入
+                # 准备模型输入
                 cluster_histories = []
                 offset_histories = []
                 dpf_vectors_batch = []
                 valid_indices = []
                 
+                # 收集所有样本，不再过滤
                 for i, (page, offset, pc, stream_id) in enumerate(zip(pages_batch, offsets_batch, pcs_batch, stream_ids_batch)):
                     prefetcher = prefetchers[stream_id]
                     cluster_history, offset_history, _, dpf_vectors = prefetcher.metadata_manager.prepare_model_inputs(
@@ -124,15 +155,21 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
                         prefetcher.cluster_mapping_utils
                     )
                     
-                    # 只处理有足够历史记录的样本
-                    if np.any(cluster_history != 0):
-                        cluster_histories.append(cluster_history)
-                        offset_histories.append(offset_history)
-                        dpf_vectors_batch.append(dpf_vectors)
-                        valid_indices.append(i)
+                    cluster_histories.append(cluster_history)
+                    offset_histories.append(offset_history)
+                    dpf_vectors_batch.append(dpf_vectors)
+                    valid_indices.append(i)
+                    
+                    # 调试输出前几个样本
+                    if processed_lines < batch_size * 3 and i < 5:
+                        print(f"\n样本 {i} 详情:")
+                        print(f"- cluster_history: {cluster_history}")
+                        print(f"- offset_history: {offset_history}")
+                        print(f"- 当前页面: {page}")
+                        print(f"- 流ID: {stream_id}")
                 
-                if valid_indices:  # 只在有有效样本时进行预测
-                    # 批量预测
+                # 执行预测
+                if valid_indices:
                     candidate_logits, offset_logits = predict_batch(
                         tf.convert_to_tensor(cluster_histories, dtype=tf.int32),
                         tf.convert_to_tensor(offset_histories, dtype=tf.int32),
@@ -140,37 +177,42 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
                         tf.convert_to_tensor(dpf_vectors_batch, dtype=tf.float32)
                     )
                     
-                    # 处理预测结果
                     candidates = tf.argmax(candidate_logits, axis=1).numpy()
                     offsets = tf.argmax(offset_logits, axis=1).numpy()
                     
-                    # 生成预取
-                    for pred_idx, batch_idx in enumerate(valid_indices):
-                        stream_id = stream_ids_batch[batch_idx]
+                    # 修改后的预取生成逻辑
+                    for j, i in enumerate(valid_indices):
+                        stream_id = stream_ids_batch[i]
                         prefetcher = prefetchers[stream_id]
                         
-                        if candidates[pred_idx] != config.num_candidates:
+                        if candidates[j] != config.num_candidates:
                             candidate_pages = prefetcher.metadata_manager.get_candidate_pages(
                                 prefetcher.page_history[-1]
                             )
                             
-                            if candidate_pages and candidates[pred_idx] < len(candidate_pages):
-                                prefetch_page = candidate_pages[candidates[pred_idx]][0]
-                                prefetch_offset = offsets[pred_idx]
-                                prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (prefetch_offset << 6)
-                                
-                                out_f.write(f"{inst_ids_batch[batch_idx]} {prefetch_addr:x}\n")
-                                stream_stats[stream_id]['prefetches'] += 1
-                                valid_prefetches += 1
+                            if candidate_pages and candidates[j] < len(candidate_pages):
+                                prefetch_page = candidate_pages[candidates[j]][0]
+                            else:
+                                # 使用当前页面或默认页面
+                                prefetch_page = prefetcher.page_history[-1]
+                                if prefetch_page == 0:
+                                    prefetch_page = pages_batch[i]  # 使用当前访问的页面
+                            
+                            prefetch_offset = offsets[j]
+                            prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (prefetch_offset << 6)
+                            
+                            out_f.write(f"{inst_ids_batch[i]} {prefetch_addr:x}\n")
+                            stream_stats[stream_id]['prefetches'] += 1
+                            valid_prefetches += 1
                     
                     total_predictions += len(valid_indices)
                 
                 # 打印批次统计
-                print(f"批次统计:")
-                print(f"- 有效样本数: {len(valid_indices)}/{batch_size}")
+                print(f"\n批次统计:")
+                print(f"- 样本数: {len(valid_indices)}")
                 print(f"- 生成预取数: {valid_prefetches}")
-                if valid_indices:
-                    print(f"- 预取生成率: {valid_prefetches/len(valid_indices)*100:.2f}%")
+                if total_predictions > 0:
+                    print(f"- 当前预取率: {valid_prefetches/total_predictions*100:.2f}%")
                 
                 # 清空批处理数组
                 pages_batch = []
@@ -193,12 +235,15 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
                             print(f"- 生成预取数: {stats['prefetches']}")
                             print(f"- 预取率: {stats['prefetches']/stats['updates']*100:.2f}%")
     
-    # 打印最终统计
+    # 最终统计（添加零检查）
     print("\n=== 预取生成完成 ===")
     print(f"总处理行数: {processed_lines}")
     print(f"总预测次数: {total_predictions}")
     print(f"有效预取数: {valid_prefetches}")
-    print(f"整体预取率: {valid_prefetches/total_predictions*100:.2f}%")
+    if total_predictions > 0:
+        print(f"整体预取率: {valid_prefetches/total_predictions*100:.2f}%")
+    else:
+        print("整体预取率: 0.00% (无有效预测)")
     
     # 打印每个流的最终统计
     print("\n=== 最终流统计 ===")
