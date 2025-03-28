@@ -1,2 +1,2 @@
-model_checkpoint_path: "tlite2_model"
-all_model_checkpoint_paths: "tlite2_model"
+model_checkpoint_path: "CFlitebase1_model"
+all_model_checkpoint_paths: "CFlitebase1_model"
