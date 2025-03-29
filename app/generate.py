@@ -138,7 +138,7 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
         return hash_value % num_streams
     
     # Optimization 3: Increase batch processing size and use memory preallocation
-    batch_size = 50000  # Increase to 50000
+    batch_size = 20000  # Increase to 20000
     print(f"Batch Processing Size: {batch_size}")
     
     # Optimization 4: Preallocate batch processing arrays to reduce memory allocation
