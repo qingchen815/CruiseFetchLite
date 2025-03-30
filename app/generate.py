@@ -4,8 +4,6 @@ import tensorflow as tf
 import lzma
 import os
 import random
-import time
-from collections import defaultdict
 
 from script.config import TLITEConfig, load_config
 from script.model import create_tlite_model
@@ -18,107 +16,26 @@ def parse_args():
     parser.add_argument('--benchmark', help='Path to benchmark trace', required=True)
     parser.add_argument('--output', help='Path to output prefetch file', required=True)
     parser.add_argument('--config', default='./config/TLITE2debug1.yaml', help='Path to configuration file')
-    parser.add_argument('--prefetch-distance', type=int, default=0, help='Prefetch distance in instructions (0 = no adjustment)')
-    parser.add_argument('--debug-file', help='Path to debug log file', default=None)
-    parser.add_argument('--simple-mode', action='store_true', help='Use simplified prefetch generation logic')
-    parser.add_argument('--sequential', action='store_true', help='Process trace sequentially without batching')
-    parser.add_argument('--test-clustering', action='store_true', help='Run tests on clustering mapping')
     return parser.parse_args()
 
-def test_clustering_mapping(clustering_info, config):
+def generate_prefetches(model, clustering_info, trace_path, config, output_path):
     """
-    Run diagnostic tests on the clustering mapping to verify it's working correctly
+    Generate prefetch file using T-LITE model with optimized stream processing
     """
-    print("\n=== Testing Clustering Mapping ===")
-    page_to_cluster = clustering_info.get('page_to_cluster', {})
-    
-    if not page_to_cluster:
-        print("ERROR: page_to_cluster mapping is empty!")
-        return
-    
-    # Test 1: Check distribution of pages across clusters
-    cluster_counts = defaultdict(int)
-    for page, cluster in page_to_cluster.items():
-        cluster_counts[cluster] += 1
-    
-    print(f"Total unique pages: {len(page_to_cluster)}")
-    print(f"Total unique clusters: {len(cluster_counts)}")
-    
-    # Find most and least populated clusters
-    if cluster_counts:
-        max_cluster = max(cluster_counts.items(), key=lambda x: x[1])
-        min_cluster = min(cluster_counts.items(), key=lambda x: x[1])
-        avg_pages = len(page_to_cluster) / len(cluster_counts)
-        
-        print(f"Most populated cluster: Cluster {max_cluster[0]} with {max_cluster[1]} pages")
-        print(f"Least populated cluster: Cluster {min_cluster[0]} with {min_cluster[1]} pages")
-        print(f"Average pages per cluster: {avg_pages:.2f}")
-    
-    # Test 2: Check cluster ID range
-    min_cluster = min(page_to_cluster.values()) if page_to_cluster else None
-    max_cluster = max(page_to_cluster.values()) if page_to_cluster else None
-    
-    print(f"Cluster ID range: {min_cluster} to {max_cluster}")
-    print(f"Configured num_clusters: {config.num_clusters}")
-    
-    if max_cluster is not None and max_cluster >= config.num_clusters:
-        print(f"WARNING: Maximum cluster ID ({max_cluster}) exceeds configured num_clusters ({config.num_clusters})")
-    
-    # Test 3: Check for problematic clusters (if any)
-    empty_clusters = [i for i in range(config.num_clusters) if i not in cluster_counts]
-    if len(empty_clusters) > 0:
-        print(f"WARNING: {len(empty_clusters)} clusters have no pages mapped to them")
-        if len(empty_clusters) < 10:
-            print(f"Empty clusters: {empty_clusters}")
-    
-    # Test 4: Create a reverse mapping (cluster to pages) and check its structure
-    cluster_to_pages = {}
-    for page, cluster in page_to_cluster.items():
-        if cluster not in cluster_to_pages:
-            cluster_to_pages[cluster] = []
-        cluster_to_pages[cluster].append(page)
-    
-    # Sample a few clusters and their pages
-    sampled_clusters = random.sample(list(cluster_to_pages.keys()), min(5, len(cluster_to_pages)))
-    print("\nSample cluster to pages mapping:")
-    for cluster in sampled_clusters:
-        pages = cluster_to_pages[cluster]
-        print(f"Cluster {cluster}: {len(pages)} pages, first few: {[f'0x{p:x}' if isinstance(p, int) else p for p in pages[:3]]}...")
-    
-    return cluster_to_pages  # Return this for potential use in generation
-
-def generate_prefetches_sequential(model, clustering_info, trace_path, config, output_path, prefetch_distance=0, debug_file=None):
-    """
-    Generate prefetch file using T-LITE model with sequential processing logic
-    that maintains the correct access order while remaining efficient
-    """
-    print(f"\n=== Starting Sequential Prefetch Generation ===")
+    print(f"\n=== Starting Prefetch Generation ===")
     print(f"Processing trace file: {trace_path}")
     print(f"Output file: {output_path}")
-    print(f"Prefetch distance: {prefetch_distance}")
     
-    # Create debug file handler if specified
-    debug_f = None
-    if debug_file:
-        os.makedirs(os.path.dirname(debug_file), exist_ok=True)
-        debug_f = open(debug_file, 'w')
-        print(f"Debug info will be written to: {debug_file}")
-    
-    # Test clustering mapping and get cluster_to_pages
-    cluster_to_pages = test_clustering_mapping(clustering_info, config)
-    
-    # Get page to cluster mapping
+    # Analyze clustering information
     page_to_cluster = clustering_info.get('page_to_cluster', {})
-    
-    # Create the prefetcher
-    prefetcher = TLITEPrefetcher(
-        model=model,
-        clustering_info=clustering_info,
-        config=config
-    )
-    
-    # Create metadata manager validator to check its state
-    metadata_manager = prefetcher.metadata_manager
+    if page_to_cluster:
+        cluster_pages = list(page_to_cluster.keys())
+        min_page = min(cluster_pages)
+        max_page = max(cluster_pages)
+        print(f"\n=== Clustering Information Analysis ===")
+        print(f"Page ID Range: {min_page:x} - {max_page:x}")
+        print(f"Number of Clusters: {len(set(page_to_cluster.values()))}")
+        print(f"Number of Mapped Pages: {len(page_to_cluster)}")
     
     # Create dynamic cluster mapper
     class DynamicClusterMapper:
@@ -153,15 +70,117 @@ def generate_prefetches_sequential(model, clustering_info, trace_path, config, o
                 print(f"- Dynamic Mapping Hits: {self.stats['dynamic_hits']} ({self.stats['dynamic_hits']/total*100:.2f}%)")
                 print(f"- New Mappings: {self.stats['new_mappings']} ({self.stats['new_mappings']/total*100:.2f}%)")
     
-    mapper = DynamicClusterMapper(page_to_cluster, config.num_clusters)
+    # Add stream load balancer monitoring
+    class StreamLoadBalancer:
+        def __init__(self, num_streams):
+            self.num_streams = num_streams
+            self.stream_loads = np.zeros(num_streams, dtype=np.int64)
+            self.total_updates = 0
+            self.last_rebalance = 0
+            self.rebalance_interval = 100000
+        
+        def update(self, stream_id):
+            self.stream_loads[stream_id] += 1
+            self.total_updates += 1
+            
+            if self.total_updates - self.last_rebalance >= self.rebalance_interval:
+                self.check_balance()
+                self.last_rebalance = self.total_updates
+        
+        def check_balance(self):
+            if self.total_updates == 0:
+                return
+            
+            active_streams = np.where(self.stream_loads > 0)[0]
+            if len(active_streams) == 0:
+                return
+            
+            loads = self.stream_loads[active_streams]
+            avg_load = np.mean(loads)
+            max_load = np.max(loads)
+            min_load = np.min(loads)
+            imbalance = max_load / min_load if min_load > 0 else float('inf')
+            
+            if imbalance > 10:
+                print(f"\nWarning: Severe Load Imbalance Detected")
+                print(f"- Maximum Load: {max_load}")
+                print(f"- Minimum Load: {min_load}")
+                print(f"- Average Load: {avg_load:.0f}")
+                print(f"- Imbalance Ratio: {imbalance:.2f}x")
+                print("Consider adjusting stream allocation algorithm or increasing stream count")
     
-    # Open files
+    # Optimization 1: Increase stream count and improve stream allocation
+    num_streams = 32
+    print(f"Using {num_streams} parallel streams")
+    
+    # Optimization 2: Improve stream ID calculation function
+    def calculate_stream_id(pc, addr):
+        """Use improved hash function to calculate stream ID"""
+        # Use multiple features for hash
+        pc_low = pc & 0xFFFF
+        pc_high = (pc >> 16) & 0xFFFF
+        addr_low = addr & 0xFFFF
+        addr_high = (addr >> 16) & 0xFFFF
+        
+        # Use FNV-1a hash algorithm
+        hash_value = 2166136261
+        for value in [pc_low, pc_high, addr_low, addr_high]:
+            hash_value = hash_value ^ value
+            hash_value = (hash_value * 16777619) & 0xFFFFFFFF
+        
+        # Use Wang hash for final mixing
+        hash_value = hash_value ^ (hash_value >> 16)
+        hash_value = (hash_value * 0x85ebca6b) & 0xFFFFFFFF
+        hash_value = hash_value ^ (hash_value >> 13)
+        hash_value = (hash_value * 0xc2b2ae35) & 0xFFFFFFFF
+        hash_value = hash_value ^ (hash_value >> 16)
+        
+        return hash_value % num_streams
+    
+    # Optimization 3: Increase batch processing size and use memory preallocation
+    batch_size = 20000  # Increase to 20000
+    print(f"Batch Processing Size: {batch_size}")
+    
+    # Optimization 4: Preallocate batch processing arrays to reduce memory allocation
+    max_batch_size = batch_size + 1000  # Add some buffer
+    pages_batch = np.zeros(max_batch_size, dtype=np.int64)
+    offsets_batch = np.zeros(max_batch_size, dtype=np.int32)
+    pcs_batch = np.zeros(max_batch_size, dtype=np.int64)
+    inst_ids_batch = np.zeros(max_batch_size, dtype=np.int64)
+    stream_ids_batch = np.zeros(max_batch_size, dtype=np.int32)
+    
+    # Optimization 5: Preallocate model input arrays
+    cluster_histories = [[] for _ in range(max_batch_size)]
+    offset_histories = [[] for _ in range(max_batch_size)]
+    dpf_vectors_batch = [[] for _ in range(max_batch_size)]
+    
+    # Initialize load balancer
+    load_balancer = StreamLoadBalancer(num_streams)
+    
+    # Initialize prefetchers and mappers
+    prefetchers = []
+    mappers = []
+    for i in range(num_streams):
+        prefetcher = TLITEPrefetcher(
+            model=model,
+            clustering_info=clustering_info,
+            config=config
+        )
+        mapper = DynamicClusterMapper(page_to_cluster, config.num_clusters)
+        prefetchers.append(prefetcher)
+        mappers.append(mapper)
+    
+    # Optimization 6: Use TensorFlow batch processing optimization
+    @tf.function(experimental_relax_shapes=True, jit_compile=True)
+    def predict_batch(cluster_histories, offset_histories, pcs, dpf_vectors):
+        return model((cluster_histories, offset_histories, pcs, dpf_vectors))
+    
+    # Read file and calculate total line count
     if trace_path.endswith('.txt.xz'):
         f = lzma.open(trace_path, mode='rt', encoding='utf-8')
     else:
         f = open(trace_path, 'r')
     
-    # Count total lines for progress reporting
     print("Calculating total lines...")
     total_lines = sum(1 for line in f if not (line.startswith('***') or line.startswith('Read')))
     f.seek(0)
@@ -170,26 +189,12 @@ def generate_prefetches_sequential(model, clustering_info, trace_path, config, o
     # Create output directory
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    # Statistics
-    stats = {
-        'total_accesses': 0,
-        'model_predictions': 0,
-        'no_prefetch_predictions': 0,
-        'empty_candidate_pages': 0,
-        'candidate_index_out_of_range': 0,
-        'fallback_to_current_page': 0,
-        'valid_prefetches': 0,
-        'next_line_prefetches': 0,
-        'processing_time': 0,
-        'prediction_time': 0
-    }
-    
-    # Create debug sample set
-    debug_samples = set()
-    
-    # Process trace file line by line
-    line_count = 0
-    start_time = time.time()
+    # Main processing loop
+    current_batch_size = 0
+    processed_lines = 0
+    total_predictions = 0
+    valid_prefetches = 0
+    stream_stats = {i: {'updates': 0, 'prefetches': 0} for i in range(num_streams)}
     
     with open(output_path, 'w', buffering=1024*1024) as out_f:
         for line in f:
@@ -206,630 +211,199 @@ def generate_prefetches_sequential(model, clustering_info, trace_path, config, o
             page = (addr >> 6) >> config.offset_bits
             offset = (addr >> 6) & ((1 << config.offset_bits) - 1)
             
-            # Check if this is a debug sample
-            is_debug_sample = (line_count % 10000 == 0) or (len(debug_samples) < 100 and random.random() < 0.005)
-            if is_debug_sample:
-                debug_samples.add(inst_id)
-                
-                if debug_f:
-                    debug_f.write(f"\n===== Debug Sample {inst_id} =====\n")
-                    debug_f.write(f"Line: {line.strip()}\n")
-                    debug_f.write(f"PC: {pc:x}, Address: {addr:x}\n")
-                    debug_f.write(f"Page: {page:x}, Offset: {offset}\n")
-                    debug_f.write(f"Current History - Pages: {prefetcher.page_history}, Offsets: {prefetcher.offset_history}\n")
+            # Use new stream allocation function
+            stream_id = calculate_stream_id(pc, addr)
             
-            # Get cluster for current page
+            # Update stream statistics
+            stream_stats[stream_id]['updates'] += 1
+            
+            # Update preallocated arrays
+            pages_batch[current_batch_size] = page
+            offsets_batch[current_batch_size] = offset
+            pcs_batch[current_batch_size] = pc
+            inst_ids_batch[current_batch_size] = inst_id
+            stream_ids_batch[current_batch_size] = stream_id
+            
+            # Update prefetchers state
+            prefetcher = prefetchers[stream_id]
+            mapper = mappers[stream_id]
             cluster_id = mapper.get_cluster(page)
-            
-            # Update prefetcher state with this access - do this BEFORE prediction to ensure history is current
             prefetcher.update_history(cluster_id, offset, pc)
             
-            # Make prediction
-            prediction_start = time.time()
+            # In main loop update load balancer
+            load_balancer.update(stream_id)
             
-            # Prepare model inputs
-            cluster_history, offset_history, _, dpf_vectors = prefetcher.metadata_manager.prepare_model_inputs(
-                prefetcher.page_history,
-                prefetcher.offset_history,
-                pc,
-                prefetcher.cluster_mapping_utils
-            )
+            current_batch_size += 1
             
-            # Convert to tensors
-            cluster_input = tf.convert_to_tensor([cluster_history], dtype=tf.int32)
-            offset_input = tf.convert_to_tensor([offset_history], dtype=tf.int32)
-            pc_input = tf.convert_to_tensor([[pc]], dtype=tf.int32)
-            dpf_input = tf.convert_to_tensor([dpf_vectors], dtype=tf.float32)
-            
-            # Make prediction
-            candidate_logits, offset_logits = model((cluster_input, offset_input, pc_input, dpf_input))
-            
-            # Get predicted candidate and offset
-            candidate_pred = tf.argmax(candidate_logits[0]).numpy()
-            offset_pred = tf.argmax(offset_logits[0]).numpy()
-            
-            stats['prediction_time'] += time.time() - prediction_start
-            
-            # Debug prediction
-            if is_debug_sample and debug_f:
-                debug_f.write(f"Model Inputs:\n")
-                debug_f.write(f"  Cluster History: {cluster_history}\n")
-                debug_f.write(f"  Offset History: {offset_history}\n")
-                debug_f.write(f"  PC: {pc:x}\n")
-                debug_f.write(f"  DPF Vectors: {dpf_vectors}\n")
-                debug_f.write(f"Prediction Results:\n")
-                debug_f.write(f"  Candidate Prediction: {candidate_pred}\n")
-                debug_f.write(f"  Offset Prediction: {offset_pred}\n")
-                debug_f.write(f"  Candidate Logits: {candidate_logits[0].numpy()}\n")
-                debug_f.write(f"  Offset Logits: {offset_logits[0].numpy()}\n")
-            
-            # Check if "no prefetch" was predicted
-            if candidate_pred == config.num_candidates:
-                stats['no_prefetch_predictions'] += 1
-                if is_debug_sample and debug_f:
-                    debug_f.write("No prefetch predicted\n")
-                
-                # Update statistics and continue
-                stats['total_accesses'] += 1
-                line_count += 1
-                continue
-            
-            stats['model_predictions'] += 1
-            
-            # Get the trigger cluster ID (last cluster in history)
-            trigger_cluster = cluster_history[-1]
-            
-            # Get candidate pages for this cluster
-            candidate_pages = prefetcher.metadata_manager.get_candidate_pages(prefetcher.page_history[-1])
-            
-            if is_debug_sample and debug_f:
-                debug_f.write(f"Trigger Cluster: {trigger_cluster}\n")
-                debug_f.write(f"Candidate Pages: {candidate_pages}\n")
-                
-                # Check DPF metadata directly
-                debug_f.write(f"Metadata for page {prefetcher.page_history[-1]:x}:\n")
-                if prefetcher.page_history[-1] in metadata_manager.page_metadata:
-                    meta = metadata_manager.page_metadata[prefetcher.page_history[-1]]
-                    debug_f.write(f"  Successors: {meta['successors']}\n")
-                    sum_trans = np.sum(meta['offset_transitions'])
-                    if sum_trans > 0:
-                        debug_f.write(f"  Offset Transitions Sum: {sum_trans}\n")
-                    else:
-                        debug_f.write("  Offset Transitions: Empty (all zeros)\n")
-                else:
-                    debug_f.write("  No metadata found for this page\n")
-            
-            # Determine prefetch page and address
-            prefetch_addr = None
-            
-            # Method 1: Try to use candidate_pages from metadata
-            if candidate_pages and candidate_pred < len(candidate_pages):
-                prefetch_page = candidate_pages[candidate_pred][0]
-                prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (offset_pred << 6)
-                stats['valid_prefetches'] += 1
-                
-                if is_debug_sample and debug_f:
-                    debug_f.write(f"Using metadata candidate: Page {prefetch_page:x} with offset {offset_pred}\n")
-                    debug_f.write(f"Prefetch address: {prefetch_addr:x}\n")
-            
-            # Method 2: If Method 1 fails, try to use cluster_to_pages mapping
-            elif cluster_to_pages and trigger_cluster in cluster_to_pages and cluster_to_pages[trigger_cluster]:
-                stats['empty_candidate_pages'] += 1
-                
-                # Select representative page from this cluster
-                prefetch_page = cluster_to_pages[trigger_cluster][0]
-                prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (offset_pred << 6)
-                
-                if is_debug_sample and debug_f:
-                    debug_f.write(f"Using cluster_to_pages mapping: Cluster {trigger_cluster} -> Page {prefetch_page:x}\n")
-                    debug_f.write(f"Prefetch address: {prefetch_addr:x}\n")
-            
-            # Method 3: Fallback to current page with predicted offset
-            else:
-                stats['fallback_to_current_page'] += 1
-                
-                if not candidate_pages:
-                    stats['empty_candidate_pages'] += 1
-                else:
-                    stats['candidate_index_out_of_range'] += 1
-                
-                prefetch_page = page
-                prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (offset_pred << 6)
-                
-                if is_debug_sample and debug_f:
-                    debug_f.write(f"Falling back to current page with predicted offset\n")
-                    debug_f.write(f"Prefetch address: {prefetch_addr:x}\n")
-            
-            # Check if prefetch equals current address
-            if prefetch_addr == addr:
-                # Use next cache line instead
-                prefetch_addr = addr + 64
-                stats['next_line_prefetches'] += 1
-                
-                if is_debug_sample and debug_f:
-                    debug_f.write(f"Prefetch equals current address, using next line: {prefetch_addr:x}\n")
-            
-            # Apply prefetch distance if specified
-            trigger_id = inst_id
-            if prefetch_distance > 0:
-                trigger_id = max(0, inst_id - prefetch_distance)
-                
-                if is_debug_sample and debug_f:
-                    debug_f.write(f"Applied prefetch distance: {inst_id} -> {trigger_id}\n")
-            
-            # Write prefetch to file
-            out_f.write(f"{trigger_id} {prefetch_addr:x}\n")
-            
-            if is_debug_sample and debug_f:
-                debug_f.write(f"Final output: {trigger_id} {prefetch_addr:x}\n")
-                debug_f.write("================================\n")
-            
-            # Update statistics and progress
-            stats['total_accesses'] += 1
-            line_count += 1
-            
-            # Update metadata with this access
-            if is_debug_sample and debug_f:
-                debug_f.write(f"Next access metadata update:\n")
-                debug_f.write(f"  Previous page: {prefetcher.page_history[-2]:x}, Previous offset: {prefetcher.offset_history[-2]}\n")
-                debug_f.write(f"  Current page: {prefetcher.page_history[-1]:x}, Current offset: {prefetcher.offset_history[-1]}\n")
-            
-            # Print progress periodically
-            if line_count % 100000 == 0:
-                elapsed = time.time() - start_time
-                stats['processing_time'] = elapsed
-                
-                progress = (line_count / total_lines) * 100
-                rate = line_count / max(1, elapsed)
-                remaining = (total_lines - line_count) / max(1, rate)
-                
-                print(f"Progress: {line_count}/{total_lines} ({progress:.2f}%) - {rate:.2f} lines/sec, Est. remaining: {remaining/60:.2f} min")
-                
-                # Print metadata statistics 
-                if line_count % 1000000 == 0:
-                    print(f"Metadata size: {metadata_manager.get_metadata_size_kb():.2f} KB")
-                    print(f"Pages with metadata: {len(metadata_manager.page_metadata)}")
+            # Process full batch
+            if current_batch_size >= batch_size:
+                # Prepare model inputs
+                valid_indices = []
+                for i in range(current_batch_size):
+                    stream_id = stream_ids_batch[i]
+                    prefetcher = prefetchers[stream_id]
                     
-                    # Check a few random pages for debugging
-                    if metadata_manager.page_metadata:
-                        debug_pages = random.sample(list(metadata_manager.page_metadata.keys()), 
-                                                  min(3, len(metadata_manager.page_metadata)))
-                        
-                        for dp in debug_pages:
-                            meta = metadata_manager.page_metadata[dp]
-                            successors = len(meta['successors'])
-                            print(f"  Page {dp:x}: {successors} successors, total transitions: {np.sum(meta['offset_transitions'])}")
+                    cluster_history, offset_history, _, dpf_vectors = prefetcher.metadata_manager.prepare_model_inputs(
+                        prefetcher.page_history,
+                        prefetcher.offset_history,
+                        pcs_batch[i],
+                        prefetcher.cluster_mapping_utils
+                    )
+                    
+                    cluster_histories[i] = cluster_history
+                    offset_histories[i] = offset_history
+                    dpf_vectors_batch[i] = dpf_vectors
+                    valid_indices.append(i)
+                
+                # Batch prediction
+                if valid_indices:
+                    candidate_logits, offset_logits = predict_batch(
+                        tf.convert_to_tensor(cluster_histories[:current_batch_size], dtype=tf.int32),
+                        tf.convert_to_tensor(offset_histories[:current_batch_size], dtype=tf.int32),
+                        tf.convert_to_tensor(pcs_batch[:current_batch_size], dtype=tf.int32),
+                        tf.convert_to_tensor(dpf_vectors_batch[:current_batch_size], dtype=tf.float32)
+                    )
+                    
+                    # Process prediction results (use vectorized operations)
+                    candidates = tf.argmax(candidate_logits, axis=1).numpy()
+                    offsets = tf.argmax(offset_logits, axis=1).numpy()
+                    
+                    # Batch generate prefetches
+                    for j, i in enumerate(valid_indices):
+                        if candidates[j] != config.num_candidates:
+                            stream_id = stream_ids_batch[i]
+                            prefetcher = prefetchers[stream_id]
+                            candidate_pages = prefetcher.metadata_manager.get_candidate_pages(
+                                prefetcher.page_history[-1]
+                            )
+                            
+                            if candidate_pages and candidates[j] < len(candidate_pages):
+                                prefetch_page = candidate_pages[candidates[j]][0]
+                            else:
+                                prefetch_page = pages_batch[i]
+                            
+                            prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (offsets[j] << 6)
+                            out_f.write(f"{inst_ids_batch[i]} {prefetch_addr:x}\n")
+                            stream_stats[stream_id]['prefetches'] += 1
+                            valid_prefetches += 1
+                    
+                    total_predictions += len(valid_indices)
+                
+                # Reset batch processing counter
+                current_batch_size = 0
+                processed_lines += batch_size
+                
+                # Print progress and stream load distribution
+                if processed_lines % (batch_size * 10) == 0:
+                    print(f"Progress: {processed_lines}/{total_lines} ({processed_lines/total_lines*100:.2f}%)")
+                    print(f"Current Prefetch Rate: {(valid_prefetches/total_predictions*100) if total_predictions > 0 else 0.00:.2f}%")
+                    
+                    if processed_lines % (batch_size * 100) == 0:
+                        total_updates = sum(stats['updates'] for stats in stream_stats.values())
+                        if total_updates > 0:
+                            print("\n=== Stream Load Distribution ===")
+                            # Only show active streams
+                            active_streams = [(sid, stats) for sid, stats in stream_stats.items() 
+                                           if stats['updates'] > 0]
+                            # Sort by update count
+                            sorted_streams = sorted(active_streams, 
+                                                 key=lambda x: x[1]['updates'], 
+                                                 reverse=True)
+                            # Show top 5 most active streams
+                            for stream_id, stats in sorted_streams[:5]:
+                                print(f"Stream {stream_id}: {stats['updates']/total_updates*100:.2f}% "
+                                     f"({stats['updates']} updates)")
+                            # Show load distribution statistics
+                            active_count = len(active_streams)
+                            print(f"\nActive Streams: {active_count}/{num_streams}")
+                            if active_count > 0:
+                                avg_load = total_updates / active_count
+                                max_load = max(stats['updates'] for _, stats in active_streams)
+                                min_load = min(stats['updates'] for _, stats in active_streams)
+                                print(f"Average Load: {avg_load:.0f} updates/stream")
+                                print(f"Load Range: {min_load} - {max_load} updates")
+                                print(f"Max/Min Load Ratio: {max_load/min_load:.2f}x")
     
-    # Close debug file if opened
-    if debug_f:
-        debug_f.close()
-    
-    # Print final statistics
-    elapsed = time.time() - start_time
-    stats['processing_time'] = elapsed
-    
+    # Final Statistics
     print("\n=== Final Statistics ===")
-    print(f"Total Lines Processed: {line_count}")
-    print(f"Processing Time: {elapsed:.2f} seconds ({line_count/elapsed:.2f} lines/sec)")
-    print(f"Prediction Time: {stats['prediction_time']:.2f} seconds ({stats['prediction_time']/line_count*1000:.2f} ms/prediction)")
-    
-    print(f"\nPrefetch Statistics:")
-    print(f"Total Accesses: {stats['total_accesses']}")
-    print(f"Model Predictions: {stats['model_predictions']} ({stats['model_predictions']/stats['total_accesses']*100:.2f}%)")
-    print(f"No Prefetch Predictions: {stats['no_prefetch_predictions']} ({stats['no_prefetch_predictions']/stats['total_accesses']*100:.2f}%)")
-    
-    if stats['model_predictions'] > 0:
-        print(f"Empty Candidate Pages: {stats['empty_candidate_pages']} ({stats['empty_candidate_pages']/stats['model_predictions']*100:.2f}%)")
-        print(f"Candidate Index Out of Range: {stats['candidate_index_out_of_range']} ({stats['candidate_index_out_of_range']/stats['model_predictions']*100:.2f}%)")
-        print(f"Fallback to Current Page: {stats['fallback_to_current_page']} ({stats['fallback_to_current_page']/stats['model_predictions']*100:.2f}%)")
-        print(f"Valid Prefetches: {stats['valid_prefetches']} ({stats['valid_prefetches']/stats['model_predictions']*100:.2f}%)")
-        print(f"Next Line Prefetches: {stats['next_line_prefetches']} ({stats['next_line_prefetches']/stats['model_predictions']*100:.2f}%)")
-    
-    # Print mapper statistics
-    mapper.print_stats()
-    
-    # Print metadata manager statistics
-    print("\nMetadata Manager Statistics:")
-    print(f"Metadata Size: {metadata_manager.get_metadata_size_kb():.2f} KB")
-    print(f"Pages with Metadata: {len(metadata_manager.page_metadata)}")
-    
-    # Check for empty metadata entries
-    if metadata_manager.page_metadata:
-        empty_succs = sum(1 for meta in metadata_manager.page_metadata.values() if not meta['successors'])
-        empty_trans = sum(1 for meta in metadata_manager.page_metadata.values() if np.sum(meta['offset_transitions']) == 0)
-        
-        print(f"Pages with Empty Successors: {empty_succs} ({empty_succs/len(metadata_manager.page_metadata)*100:.2f}%)")
-        print(f"Pages with Empty Transitions: {empty_trans} ({empty_trans/len(metadata_manager.page_metadata)*100:.2f}%)")
-        
-        # Check distribution of successor counts
-        succ_counts = [len(meta['successors']) for meta in metadata_manager.page_metadata.values()]
-        if succ_counts:
-            avg_succs = sum(succ_counts) / len(succ_counts)
-            max_succs = max(succ_counts) if succ_counts else 0
-            min_succs = min(succ_counts) if succ_counts else 0
-            
-            print(f"Successor Statistics:")
-            print(f"  Average Successors per Page: {avg_succs:.2f}")
-            print(f"  Max Successors for a Page: {max_succs}")
-            print(f"  Min Successors for a Page: {min_succs}")
-    
-    return stats
-
-def generate_prefetches_efficient(model, clustering_info, trace_path, config, output_path, prefetch_distance=0, debug_file=None):
-    """
-    Generate prefetch file using a hybrid approach:
-    - Process trace in mini-batches to maintain locality
-    - Compile model with tf.function for better performance
-    - Use vectorized operations where possible
-    """
-    print(f"\n=== Starting Efficient Prefetch Generation ===")
-    print(f"Processing trace file: {trace_path}")
-    print(f"Output file: {output_path}")
-    print(f"Prefetch distance: {prefetch_distance}")
-    
-    # Create debug file handler if specified
-    debug_f = None
-    if debug_file:
-        os.makedirs(os.path.dirname(debug_file), exist_ok=True)
-        debug_f = open(debug_file, 'w')
-        print(f"Debug info will be written to: {debug_file}")
-    
-    # Get page to cluster mapping
-    page_to_cluster = clustering_info.get('page_to_cluster', {})
-    
-    # Create reverse mapping: cluster to pages
-    cluster_to_pages = {}
-    for page, cluster in page_to_cluster.items():
-        if cluster not in cluster_to_pages:
-            cluster_to_pages[cluster] = []
-        cluster_to_pages[cluster].append(page)
-    
-    # Create single prefetcher
-    prefetcher = TLITEPrefetcher(
-        model=model,
-        clustering_info=clustering_info,
-        config=config
-    )
-    
-    # Create dynamic cluster mapper
-    class DynamicClusterMapper:
-        def __init__(self, static_mapping, num_clusters):
-            self.static_mapping = static_mapping
-            self.dynamic_mapping = {}
-            self.num_clusters = num_clusters
-            self.stats = {'static_hits': 0, 'dynamic_hits': 0, 'new_mappings': 0}
-        
-        def get_cluster(self, page_id):
-            # Try static mapping
-            if page_id in self.static_mapping:
-                self.stats['static_hits'] += 1
-                return self.static_mapping[page_id]
-            
-            # Try dynamic mapping
-            if page_id in self.dynamic_mapping:
-                self.stats['dynamic_hits'] += 1
-                return self.dynamic_mapping[page_id]
-            
-            # Create new mapping
-            new_cluster = hash(page_id) % self.num_clusters
-            self.dynamic_mapping[page_id] = new_cluster
-            self.stats['new_mappings'] += 1
-            return new_cluster
-    
-    mapper = DynamicClusterMapper(page_to_cluster, config.num_clusters)
-    
-    # Optimize model prediction with tf.function
-    @tf.function(jit_compile=True)
-    def predict_batch(cluster_histories, offset_histories, pcs, dpf_vectors):
-        return model((cluster_histories, offset_histories, pcs, dpf_vectors))
-    
-    # Open files
-    if trace_path.endswith('.txt.xz'):
-        f = lzma.open(trace_path, mode='rt', encoding='utf-8')
+    print(f"Total Lines Processed: {processed_lines}")
+    print(f"Total Predictions: {total_predictions}")
+    print(f"Valid Prefetches: {valid_prefetches}")
+    if total_predictions > 0:
+        print(f"Overall Prefetch Rate: {valid_prefetches/total_predictions*100:.2f}%")
     else:
-        f = open(trace_path, 'r')
+        print("Overall Prefetch Rate: 0.00% (no predictions)")
     
-    # Count total lines for progress reporting
-    print("Calculating total lines...")
-    total_lines = sum(1 for line in f if not (line.startswith('***') or line.startswith('Read')))
-    f.seek(0)
-    print(f"Total lines to process: {total_lines}")
-    
-    # Create output directory
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
-    # Statistics counters
-    stats = {
-        'total_accesses': 0,
-        'model_predictions': 0,
-        'no_prefetch_predictions': 0,
-        'empty_candidate_pages': 0,
-        'candidate_index_out_of_range': 0,
-        'fallback_to_current_page': 0,
-        'valid_prefetches': 0,
-        'next_line_prefetches': 0,
-        'processing_time': 0,
-        'prediction_time': 0
-    }
-    
-    # Set mini-batch size (small enough to maintain locality, large enough for efficiency)
-    mini_batch_size = 128
-    
-    # Pre-allocate arrays for mini-batch processing
-    pages_batch = np.zeros(mini_batch_size, dtype=np.int64)
-    offsets_batch = np.zeros(mini_batch_size, dtype=np.int32)
-    pcs_batch = np.zeros(mini_batch_size, dtype=np.int64)
-    inst_ids_batch = np.zeros(mini_batch_size, dtype=np.int64)
-    addrs_batch = np.zeros(mini_batch_size, dtype=np.int64)
-    cluster_histories_batch = np.zeros((mini_batch_size, config.history_length), dtype=np.int32)
-    offset_histories_batch = np.zeros((mini_batch_size, config.history_length), dtype=np.int32)
-    dpf_vectors_batch = np.zeros((mini_batch_size, 1, config.num_candidates), dtype=np.float32)
-    
-    # Start processing
-    start_time = time.time()
-    line_count = 0
-    debug_sample_indices = set()
-    current_batch_size = 0
-    
-    with open(output_path, 'w', buffering=1024*1024) as out_f:
-        # Main processing loop
-        while True:
-            mini_batch_lines = []
-            batch_count = 0
-            
-            # Read a mini-batch of lines
-            while batch_count < mini_batch_size:
-                line = f.readline()
-                if not line:  # End of file
-                    break
-                
-                if line.startswith('***') or line.startswith('Read'):
-                    continue
-                
-                mini_batch_lines.append(line)
-                batch_count += 1
-            
-            if not mini_batch_lines:  # End of file
-                break
-            
-            current_batch_size = len(mini_batch_lines)
-            
-            # Process each line in the mini-batch sequentially to maintain history consistency
-            for i, line in enumerate(mini_batch_lines):
-                # Parse line
-                split = line.strip().split(', ')
-                inst_id = int(split[0])
-                pc = int(split[3], 16)
-                addr = int(split[2], 16)
-                
-                # Calculate page and offset
-                page = (addr >> 6) >> config.offset_bits
-                offset = (addr >> 6) & ((1 << config.offset_bits) - 1)
-                
-                # Store in batch arrays
-                pages_batch[i] = page
-                offsets_batch[i] = offset
-                pcs_batch[i] = pc
-                inst_ids_batch[i] = inst_id
-                addrs_batch[i] = addr
-                
-                # Select debug samples
-                is_debug_sample = (line_count % 10000 == 0) or (random.random() < 0.001)
-                if is_debug_sample:
-                    debug_sample_indices.add(i)
-                
-                # Get cluster ID for current page
-                cluster_id = mapper.get_cluster(page)
-                
-                # Update prefetcher history
-                prefetcher.update_history(cluster_id, offset, pc)
-                
-                # Prepare model inputs for this sample
-                cluster_history, offset_history, _, dpf_vectors = prefetcher.metadata_manager.prepare_model_inputs(
-                    prefetcher.page_history, 
-                    prefetcher.offset_history,
-                    pc,
-                    prefetcher.cluster_mapping_utils
-                )
-                
-                # Store in batch arrays
-                cluster_histories_batch[i] = cluster_history
-                offset_histories_batch[i] = offset_history
-                dpf_vectors_batch[i, 0] = dpf_vectors
-                
-                line_count += 1
-            
-            # Batch prediction for all samples
-            prediction_start = time.time()
-            candidate_logits, offset_logits = predict_batch(
-                tf.convert_to_tensor(cluster_histories_batch[:current_batch_size], dtype=tf.int32),
-                tf.convert_to_tensor(offset_histories_batch[:current_batch_size], dtype=tf.int32),
-                tf.convert_to_tensor(pcs_batch[:current_batch_size, np.newaxis], dtype=tf.int32),
-                tf.convert_to_tensor(dpf_vectors_batch[:current_batch_size], dtype=tf.float32)
-            )
-            stats['prediction_time'] += time.time() - prediction_start
-            
-            # Process predictions and generate prefetches
-            candidates = tf.argmax(candidate_logits, axis=1).numpy()
-            offsets_pred = tf.argmax(offset_logits, axis=1).numpy()
-            
-            # Process each prediction in the mini-batch
-            for i in range(current_batch_size):
-                is_debug_sample = i in debug_sample_indices
-                
-                # Debug output
-                if is_debug_sample and debug_f:
-                    debug_f.write(f"\n===== Debug Sample {line_count - current_batch_size + i} =====\n")
-                    debug_f.write(f"PC: {pcs_batch[i]:x}, Address: {addrs_batch[i]:x}\n")
-                    debug_f.write(f"Page: {pages_batch[i]:x}, Offset: {offsets_batch[i]}\n")
-                    debug_f.write(f"Cluster History: {cluster_histories_batch[i]}\n")
-                    debug_f.write(f"Offset History: {offset_histories_batch[i]}\n")
-                    debug_f.write(f"Prediction - Candidate: {candidates[i]}, Offset: {offsets_pred[i]}\n")
-                
-                # Check if "no prefetch" was predicted
-                if candidates[i] == config.num_candidates:
-                    stats['no_prefetch_predictions'] += 1
-                    stats['total_accesses'] += 1
-                    continue
-                
-                stats['model_predictions'] += 1
-                
-                # Get trigger cluster and page
-                trigger_cluster = cluster_histories_batch[i][-1]
-                trigger_page = pages_batch[i]
-                
-                # Get candidate pages
-                candidate_pages = prefetcher.metadata_manager.get_candidate_pages(
-                    cluster_histories_batch[i][-1]  # Use last page in history
-                )
-                
-                # Determine prefetch page and address
-                prefetch_addr = None
-                
-                # Method 1: Try to use candidate_pages from metadata
-                if candidate_pages and candidates[i] < len(candidate_pages):
-                    prefetch_page = candidate_pages[candidates[i]][0]
-                    prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (offsets_pred[i] << 6)
-                    stats['valid_prefetches'] += 1
-                    
-                    if is_debug_sample and debug_f:
-                        debug_f.write(f"Using metadata candidate: Page {prefetch_page:x}\n")
-                
-                # Method 2: If Method 1 fails, try to use cluster_to_pages mapping
-                elif cluster_to_pages and trigger_cluster in cluster_to_pages and cluster_to_pages[trigger_cluster]:
-                    stats['empty_candidate_pages'] += 1
-                    
-                    # Select representative page from this cluster
-                    prefetch_page = cluster_to_pages[trigger_cluster][0]
-                    prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (offsets_pred[i] << 6)
-                    
-                    if is_debug_sample and debug_f:
-                        debug_f.write(f"Using cluster mapping: Cluster {trigger_cluster} -> Page {prefetch_page:x}\n")
-                
-                # Method 3: Fallback to current page with predicted offset
-                else:
-                    stats['fallback_to_current_page'] += 1
-                    
-                    if not candidate_pages:
-                        stats['empty_candidate_pages'] += 1
-                    else:
-                        stats['candidate_index_out_of_range'] += 1
-                    
-                    prefetch_page = trigger_page
-                    prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (offsets_pred[i] << 6)
-                    
-                    if is_debug_sample and debug_f:
-                        debug_f.write(f"Falling back to current page\n")
-                
-                # Check if prefetch equals current address
-                if prefetch_addr == addrs_batch[i]:
-                    # Use next cache line instead
-                    prefetch_addr = addrs_batch[i] + 64
-                    stats['next_line_prefetches'] += 1
-                    
-                    if is_debug_sample and debug_f:
-                        debug_f.write(f"Using next line instead: {prefetch_addr:x}\n")
-                
-                # Apply prefetch distance if specified
-                trigger_id = inst_ids_batch[i]
-                if prefetch_distance > 0:
-                    trigger_id = max(0, inst_ids_batch[i] - prefetch_distance)
-                
-                # Write prefetch to file
-                out_f.write(f"{trigger_id} {prefetch_addr:x}\n")
-                
-                if is_debug_sample and debug_f:
-                    debug_f.write(f"Final output: {trigger_id} {prefetch_addr:x}\n")
-                    debug_f.write("================================\n")
-                
-                stats['total_accesses'] += 1
-            
-            # Print progress periodically
-            if line_count % 100000 == 0:
-                elapsed = time.time() - start_time
-                stats['processing_time'] = elapsed
-                
-                progress = (line_count / total_lines) * 100
-                rate = line_count / max(1, elapsed)
-                remaining = (total_lines - line_count) / max(1, rate)
-                
-                print(f"Progress: {line_count}/{total_lines} ({progress:.2f}%) - {rate:.2f} lines/sec, Est. remaining: {remaining/60:.2f} min")
-                
-                # Print metadata statistics periodically
-                if line_count % 1000000 == 0:
-                    print(f"Metadata size: {prefetcher.metadata_manager.get_metadata_size_kb():.2f} KB")
-                    print(f"Pages with metadata: {len(prefetcher.metadata_manager.page_metadata)}")
-    
-    # Close debug file if opened
-    if debug_f:
-        debug_f.close()
-    
-    # Print final statistics
-    elapsed = time.time() - start_time
-    stats['processing_time'] = elapsed
-    
-    print("\n=== Final Statistics ===")
-    print(f"Total Lines Processed: {line_count}")
-    print(f"Processing Time: {elapsed:.2f} seconds ({line_count/elapsed:.2f} lines/sec)")
-    print(f"Prediction Time: {stats['prediction_time']:.2f} seconds ({stats['prediction_time']/line_count*1000:.2f} ms/prediction)")
-    
-    # Print detailed statistics
-    print(f"\nPrefetch Statistics:")
-    print(f"Total Accesses: {stats['total_accesses']}")
-    print(f"Model Predictions: {stats['model_predictions']} ({stats['model_predictions']/stats['total_accesses']*100:.2f}%)")
-    print(f"No Prefetch Predictions: {stats['no_prefetch_predictions']} ({stats['no_prefetch_predictions']/stats['total_accesses']*100:.2f}%)")
-    
-    if stats['model_predictions'] > 0:
-        print(f"Empty Candidate Pages: {stats['empty_candidate_pages']} ({stats['empty_candidate_pages']/stats['model_predictions']*100:.2f}%)")
-        print(f"Candidate Index Out of Range: {stats['candidate_index_out_of_range']} ({stats['candidate_index_out_of_range']/stats['model_predictions']*100:.2f}%)")
-        print(f"Fallback to Current Page: {stats['fallback_to_current_page']} ({stats['fallback_to_current_page']/stats['model_predictions']*100:.2f}%)")
-        print(f"Valid Prefetches: {stats['valid_prefetches']} ({stats['valid_prefetches']/stats['model_predictions']*100:.2f}%)")
-        print(f"Next Line Prefetches: {stats['next_line_prefetches']} ({stats['next_line_prefetches']/stats['model_predictions']*100:.2f}%)")
-    
-    return stats
+    # Print final stream load distribution
+    print("\n=== Final Stream Load Distribution ===")
+    total_updates = sum(stats['updates'] for stats in stream_stats.values())
+    if total_updates > 0:
+        active_streams = [(sid, stats) for sid, stats in stream_stats.items() 
+                       if stats['updates'] > 0]
+        sorted_streams = sorted(active_streams, 
+                             key=lambda x: x[1]['updates'], 
+                             reverse=True)
+        
+        print("\nTop 10 Most Active Streams:")
+        for stream_id, stats in sorted_streams[:10]:
+            prefetch_rate = (stats['prefetches'] / stats['updates'] * 100 
+                           if stats['updates'] > 0 else 0)
+            print(f"Stream {stream_id}:")
+            print(f"   Load: {stats['updates']/total_updates*100:.2f}% ({stats['updates']} updates)")
+            print(f"   Prefetches: {prefetch_rate:.2f}% ({stats['prefetches']} prefetches)")
+        
+        print("\nLoad Distribution Statistics:")
+        active_count = len(active_streams)
+        print(f"Active Streams: {active_count}/{num_streams}")
+        if active_count > 0:
+            avg_load = total_updates / active_count
+            max_load = max(stats['updates'] for _, stats in active_streams)
+            min_load = min(stats['updates'] for _, stats in active_streams)
+            print(f"Average Load: {avg_load:.0f} updates/stream")
+            print(f"Load Range: {min_load} - {max_load} updates")
+            print(f"Max/Min Load Ratio: {max_load/min_load:.2f}x")
 
 def main():
     args = parse_args()
     
-    # 加载配置、模型和聚类信息的代码保持不变...
+    # Load configuration
+    config = load_config(args.config)
     
-    # 修改这部分代码
-    if args.test_clustering:
-        test_clustering_mapping(clustering_info, config)
+    # Load model, ignore warnings and add debug output
+    print("\n=== Loading Model ===")
+    model = create_tlite_model(config)
+    model.load_weights(args.model_path).expect_partial()
+    print(f"Model weights loaded successfully. Model structure:")
+    print(model.summary())
     
-    # 使用新的高效处理函数替代原来的三个选项
-    generate_prefetches_efficient(
+    # Load clustering information with debug output
+    print("\n=== Loading Clustering Information ===")
+    clustering_info = np.load(args.clustering_path, allow_pickle=True).item()
+    print(f"Clustering information loaded. Available keys: {clustering_info.keys()}")
+    print(f"Clustering information contains {len(clustering_info.get('page_to_cluster', {}))} page mappings")
+
+    # Modify random sampling print code
+    page_to_cluster = clustering_info.get('page_to_cluster', {})
+    if page_to_cluster:
+        sample_keys = random.sample(list(page_to_cluster.keys()), min(5, len(page_to_cluster)))
+        print("Random sample of 5 mappings:")
+        for page in sample_keys:
+            cluster = page_to_cluster[page]
+            if isinstance(page, int):
+                print(f"Page {page:x} -> Cluster {cluster}")
+            else:
+                print(f"Page {page} -> Cluster {cluster}")
+    
+    # Generate prefetches
+    generate_prefetches(
         model=model,
         clustering_info=clustering_info,
         trace_path=args.benchmark,
         config=config,
-        output_path=args.output,
-        prefetch_distance=args.prefetch_distance,
-        debug_file=args.debug_file
+        output_path=args.output
     )
     
-    # 多预取距离生成部分也需要修改
-    if args.prefetch_distance == 0:
-        print("\n=== Generating Multiple Prefetch Files with Different Distances ===")
-        distances = [20, 50, 100, 200, 500]
-        
-        for distance in distances:
-            distance_output = f"{os.path.splitext(args.output)[0]}_d{distance}{os.path.splitext(args.output)[1]}"
-            distance_debug = None
-            if args.debug_file:
-                distance_debug = f"{os.path.splitext(args.debug_file)[0]}_d{distance}.log"
-            
-            print(f"\nGenerating prefetch file with distance {distance}...")
-            
-            # 使用新的高效函数
-            generate_prefetches_efficient(
-                model=model,
-                clustering_info=clustering_info,
-                trace_path=args.benchmark,
-                config=config,
-                output_path=distance_output,
-                prefetch_distance=distance,
-                debug_file=distance_debug
-            )
-    
     print("Prefetch generation complete!")
+
+if __name__ == "__main__":
+    main()
