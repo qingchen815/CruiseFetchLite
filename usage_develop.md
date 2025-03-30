@@ -46,8 +46,10 @@ python generate.py --model-path /path/to/model --clustering-path /path/to/cluste
 这个版本保留了高效处理的优势，同时确保了正确的访问顺序和元数据更新连贯性。希望这能解决您的预取性能问题！
 
 new generate
-python generate.py --model-path /data/models/CFlitebase1_model --clustering-path /data/models/clustering.npy --benchmark /data/traces/471.omnetpp-s0.txt.xz --output /data/models/prefetch_base1_471tpp0.txt --sequential --debug-file /data/models/debug_471tpp0.log --prefetch-distance 100 --config ./config/base1.yaml
+python generate.py --model-path /data/models/CFlitebase1_model --clustering-path /data/models/clustering.npy --benchmark /data/traces/471.omnetpp-s0.txt.xz --output /data/models/prefetch_base1_471tpp0.txt --debug-file /data/models/debug_471tpp0.log --prefetch-distance 100 --config ./config/base1.yaml
 
 
 
 '--config', default='./config/base1.yaml'
+
+python generate.py --model-path /path/to/model --clustering-path /path/to/clustering.npy --benchmark /path/to/trace.txt --output /path/to/output.txt --debug-file debug.log --prefetch-distance 100
