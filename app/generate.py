@@ -116,26 +116,11 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
     # Optimization 2: Improve stream ID calculation function
     def calculate_stream_id(pc, addr):
         """Use improved hash function to calculate stream ID"""
-        # Use multiple features for hash
-        pc_low = pc & 0xFFFF
-        pc_high = (pc >> 16) & 0xFFFF
-        addr_low = addr & 0xFFFF
-        addr_high = (addr >> 16) & 0xFFFF
+        # Extract page ID for stream allocation to ensure related pages are in same stream
+        page = (addr >> 6) >> config.offset_bits
         
-        # Use FNV-1a hash algorithm
-        hash_value = 2166136261
-        for value in [pc_low, pc_high, addr_low, addr_high]:
-            hash_value = hash_value ^ value
-            hash_value = (hash_value * 16777619) & 0xFFFFFFFF
-        
-        # Use Wang hash for final mixing
-        hash_value = hash_value ^ (hash_value >> 16)
-        hash_value = (hash_value * 0x85ebca6b) & 0xFFFFFFFF
-        hash_value = hash_value ^ (hash_value >> 13)
-        hash_value = (hash_value * 0xc2b2ae35) & 0xFFFFFFFF
-        hash_value = hash_value ^ (hash_value >> 16)
-        
-        return hash_value % num_streams
+        # Use page ID for stream allocation to maintain temporal locality
+        return page % num_streams
     
     # Optimization 3: Increase batch processing size and use memory preallocation
     batch_size = 20000  # Increase to 20000
@@ -230,6 +215,15 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
             cluster_id = mapper.get_cluster(page)
             prefetcher.update_history(cluster_id, offset, pc)
             
+            # Update page transition relationship
+            if len(prefetcher.page_history) > 1:
+                prev_page = prefetcher.page_history[-2]  # previous page
+                current_page = prefetcher.page_history[-1]  # current page
+                prev_offset = prefetcher.offset_history[-2]  # previous offset
+                prefetcher.metadata_manager.update_page_access(
+                    prev_page, current_page, prev_offset, offset
+                )
+            
             # In main loop update load balancer
             load_balancer.update(stream_id)
             
@@ -277,12 +271,17 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
                                 prefetcher.page_history[-1]
                             )
                             
-                            if candidate_pages and candidates[j] < len(candidate_pages):
-                                prefetch_page = candidate_pages[candidates[j]][0]
-                            else:
+                            # When candidate list is empty, use fallback strategy
+                            if not candidate_pages:
+                                # Fallback strategy: use next cache line
                                 prefetch_page = pages_batch[i]
+                                prefetch_offset = (offsets_batch[i] + 1) % 64
+                            else:
+                                # Normal case: use predicted candidate
+                                prefetch_page = candidate_pages[min(candidates[j], len(candidate_pages)-1)][0]
+                                prefetch_offset = offsets[j]
                             
-                            prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (offsets[j] << 6)
+                            prefetch_addr = (prefetch_page << (config.offset_bits + 6)) | (prefetch_offset << 6)
                             out_f.write(f"{inst_ids_batch[i]} {prefetch_addr:x}\n")
                             stream_stats[stream_id]['prefetches'] += 1
                             valid_prefetches += 1
@@ -323,6 +322,25 @@ def generate_prefetches(model, clustering_info, trace_path, config, output_path)
                                 print(f"Average Load: {avg_load:.0f} updates/stream")
                                 print(f"Load Range: {min_load} - {max_load} updates")
                                 print(f"Max/Min Load Ratio: {max_load/min_load:.2f}x")
+                            
+                            # Add metadata statistics
+                            metadata_sizes = [len(prefetcher.metadata_manager.page_metadata) 
+                                             for prefetcher in prefetchers]
+                            total_metadata_entries = sum(metadata_sizes)
+                            print(f"\n=== Metadata Statistics ===")
+                            print(f"Total metadata entries: {total_metadata_entries}")
+                            print(f"Average entries per stream: {total_metadata_entries/num_streams:.1f}")
+                            
+                            # Check a few random pages for candidates
+                            if total_metadata_entries > 0:
+                                for i in range(min(3, len(prefetchers))):
+                                    prefetcher = prefetchers[i]
+                                    if len(prefetcher.page_history) > 0 and prefetcher.page_history[-1] != 0:
+                                        trigger_page = prefetcher.page_history[-1]
+                                        candidates = prefetcher.metadata_manager.get_candidate_pages(trigger_page)
+                                        print(f"Stream {i} - Page {trigger_page:x} has {len(candidates)} candidates")
+                                        if candidates:
+                                            print(f"  Top candidate: Page {candidates[0][0]:x} (freq: {candidates[0][1]})")
     
     # Final Statistics
     print("\n=== Final Statistics ===")
