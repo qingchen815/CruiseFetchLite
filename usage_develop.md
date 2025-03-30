@@ -29,4 +29,4 @@ python generate.py \
  --output /data/models/prefetchbase1.txt \
  --config /app/config/base1.yaml
 
-python generate.py \--model-path /data/models/CFlitebase1_model \--clustering-path /data/models/clustering.npy \--benchmark /data/traces/471.omnetpp-s0.txt.xz \--output /data/models/prefetchbase1.txt \--config /app/config/base1.yaml
+python generate.py \--model-path /data/models/CFlitebase1_model \--clustering-path /data/models/clustering.npy \--benchmark /data/traces/471.omnetpp-s0.txt.xz \--output /data/models/prefetchbase1fix471tpp0.txt \--config /app/config/base1.yaml
